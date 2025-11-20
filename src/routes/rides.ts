@@ -89,12 +89,13 @@ ridesRouter.post("/", async (req: AuthRequest, res: Response) => {
     }
 
     // Subscription and credits
-    const subValidation = await validateSubscriptionAndCredits(userId, ride_type);
-    if (!subValidation.ok) {
-      return res
-        .status(subValidation.code || 400)
-        .json({ error: subValidation.message });
-    }
+const subValidation = await validateSubscriptionAndCredits(userId, ride_type);
+if (!subValidation.ok) {
+  return res
+    .status(400)
+    .json({ error: "Subscription or credits are not valid for this ride." });
+}
+
 
     // Create ride
     const result = await pool.query(
