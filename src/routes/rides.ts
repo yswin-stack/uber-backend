@@ -211,22 +211,49 @@ type RideStatus = (typeof ALLOWED_STATUSES)[number];
 
 /**
  * PATCH /rides/:id/status
- * Admin: update the status of a ride (e.g. confirm, completed, cancelled).
+ * Updates the ride status (e.g. driver_en_route, arrived, in_progress, completed, cancelled).
  */
 ridesRouter.patch("/:id/status", async (req: AuthRequest, res: Response) => {
   try {
     const rideId = Number(req.params.id);
-    const { status } = req.body as { status?: string };
+    const { status: newStatus } = req.body as { status?: string };
 
     if (!rideId || Number.isNaN(rideId)) {
       return res.status(400).json({ error: "Invalid ride id." });
     }
 
-    if (!status || !ALLOWED_STATUSES.includes(status as RideStatus)) {
-      return res.status(400).json({ error: "Invalid or missing status." });
+    if (!newStatus) {
+      return res.status(400).json({ error: "Missing status in body." });
     }
 
-    const result = await pool.query(
+    // Load current ride to get previous status
+    const existingResult = await pool.query(
+      `
+      SELECT
+        id,
+        user_id,
+        status,
+        pickup_location,
+        dropoff_location,
+        pickup_time,
+        ride_type,
+        is_fixed,
+        created_at
+      FROM rides
+      WHERE id = $1
+      `,
+      [rideId]
+    );
+
+    if ((existingResult.rowCount ?? 0) === 0) {
+      return res.status(404).json({ error: "Ride not found." });
+    }
+
+    const existing = existingResult.rows[0];
+    const prevStatus: string = existing.status;
+
+    // Update status
+    const updatedResult = await pool.query(
       `
       UPDATE rides
       SET status = $1
@@ -242,20 +269,19 @@ ridesRouter.patch("/:id/status", async (req: AuthRequest, res: Response) => {
         status,
         created_at
       `,
-      [status, rideId]
+      [newStatus, rideId]
     );
 
-    if ((result.rowCount ?? 0) === 0) {
-      return res.status(404).json({ error: "Ride not found." });
-    }
+    const updatedRide = updatedResult.rows[0];
 
-    // Later we can emit a Socket.IO event here to notify tracking screens.
-    // e.g. io.to(\`ride:${rideId}\`).emit("ride_status_update", { rideId, status });
+    // Fire-and-forget SMS (don't block response if SMS fails)
+    sendRideStatusSms(rideId, prevStatus, newStatus).catch((err) => {
+      console.error("Error sending SMS for ride status change:", err);
+    });
 
-    return res.json(result.rows[0]);
+    return res.json(updatedRide);
   } catch (err) {
     console.error("Error in PATCH /rides/:id/status", err);
     return res.status(500).json({ error: "Internal server error" });
   }
 });
-
