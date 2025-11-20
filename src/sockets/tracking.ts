@@ -1,62 +1,38 @@
 import { Server, Socket } from "socket.io";
 
-interface TrackingAuth {
-  role?: "driver" | "rider";
-  driverId?: string;
-  userId?: string;
+interface DriverLocationPayload {
+  rideId: number;
+  lat: number;
+  lng: number;
 }
 
 export function setupTrackingSockets(io: Server) {
   io.on("connection", (socket: Socket) => {
-    const auth = socket.handshake.auth as TrackingAuth;
+    console.log("🔌 Socket connected:", socket.id);
 
-    console.log("Socket connected", {
-      id: socket.id,
-      role: auth.role,
-      driverId: auth.driverId,
-      userId: auth.userId,
-    });
-
-    socket.on("join_ride", (rideId: string) => {
+    // Rider joins a room for a specific ride
+    socket.on("join_ride", (rideId: number) => {
       if (!rideId) return;
-      socket.join(rideId);
-      console.log(`Socket ${socket.id} joined ride room ${rideId}`);
+      const room = `ride:${rideId}`;
+      socket.join(room);
+      console.log(`👤 Rider socket ${socket.id} joined room ${room}`);
     });
 
-    // Driver sends location updates
-    socket.on(
-      "location_update",
-      (payload: { rideId: string; lat: number; lng: number }) => {
-        const { rideId, lat, lng } = payload || {};
-        if (!rideId || typeof lat !== "number" || typeof lng !== "number") {
-          return;
-        }
+    // Driver sends location updates for a ride
+    socket.on("driver_location_update", (payload: DriverLocationPayload) => {
+      const { rideId, lat, lng } = payload || {};
+      if (!rideId || lat == null || lng == null) return;
 
-        const auth = socket.handshake.auth as TrackingAuth;
-        if (auth.role !== "driver") {
-          console.warn("Non-driver tried to send location_update");
-          return;
-        }
+      const room = `ride:${rideId}`;
+      const message = { rideId, lat, lng, ts: Date.now() };
 
-        // Broadcast to riders in this ride room
-        io.to(rideId).emit("location_update", {
-          rideId,
-          lat,
-          lng,
-          updatedAt: new Date().toISOString(),
-        });
-
-        // Mock ETA calculation
-        const mockEtaMinutes = 5 + Math.floor(Math.random() * 10);
-        io.to(rideId).emit("ride_eta_update", {
-          rideId,
-          etaMinutes: mockEtaMinutes,
-        });
-      }
-    );
+      // Broadcast to all riders in this ride room
+      io.to(room).emit("location_update", message);
+      console.log(`📍 Location update for ride ${rideId}:`, { lat, lng });
+    });
 
     socket.on("disconnect", () => {
-      console.log("Socket disconnected", socket.id);
+      console.log("❌ Socket disconnected:", socket.id);
     });
   });
 }
