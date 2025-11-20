@@ -7,6 +7,8 @@ import { ridesRouter } from "./routes/rides";
 import { mockAuth } from "./middlewares/auth";
 import { setupTrackingSockets } from "./sockets/tracking";
 import { initDb } from "./db/init";
+import authRouter from "./routes/auth";
+
 
 dotenv.config();
 
