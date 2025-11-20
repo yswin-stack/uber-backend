@@ -36,6 +36,17 @@ export async function initDb() {
     ON rides (user_id, pickup_time);
   `;
 
+  // Create tables
   await pool.query(sql);
-  console.log("✅ Database initialized (tables ensured).");
+
+  // Ensure a demo user with id=1 exists (for your test bookings)
+  await pool.query(
+    `
+    INSERT INTO users (id, email, full_name, role)
+    VALUES (1, 'demo@example.com', 'Demo User', 'subscriber')
+    ON CONFLICT (id) DO NOTHING;
+    `
+  );
+
+  console.log("✅ Database initialized (tables + demo user ensured).");
 }
