@@ -37,6 +37,35 @@ async function validateSubscriptionAndCredits(_userId: number, _rideType: string
 
 
 ridesRouter.post("/", async (req: AuthRequest, res: Response) => {
+
+  // Admin: get all rides (for now no auth, just returns everything)
+ridesRouter.get("/admin", async (_req: AuthRequest, res: Response) => {
+  try {
+    const result = await pool.query(
+      `
+      SELECT
+        id,
+        user_id,
+        pickup_location,
+        dropoff_location,
+        pickup_time,
+        ride_type,
+        is_fixed,
+        status,
+        created_at
+      FROM rides
+      ORDER BY pickup_time ASC;
+      `
+    );
+
+    return res.json(result.rows);
+  } catch (err) {
+    console.error("Error in GET /rides/admin", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+  
   try {
     const userId = req.userId;
     if (!userId) {
