@@ -5,6 +5,8 @@ import dotenv from "dotenv";
 import { Server } from "socket.io";
 import { ridesRouter } from "./routes/rides";
 import { mockAuth } from "./middlewares/auth";
+import { setupTrackingSockets } from "./sockets/tracking";
+import { initDb } from "./db/init";
 
 dotenv.config();
 
@@ -30,11 +32,22 @@ const io = new Server(httpServer, {
   },
 });
 
-import { setupTrackingSockets } from "./sockets/tracking";
 setupTrackingSockets(io);
 
 const PORT = process.env.PORT || 4000;
 
-httpServer.listen(PORT, () => {
-  console.log(`Server listening on http://localhost:${PORT}`);
-});
+async function start() {
+  try {
+    // 🔥 This line creates tables if they don't exist
+    await initDb();
+
+    httpServer.listen(PORT, () => {
+      console.log(`🚀 Server listening on http://localhost:${PORT}`);
+    });
+  } catch (err) {
+    console.error("❌ Failed to initialize database", err);
+    process.exit(1);
+  }
+}
+
+start();
