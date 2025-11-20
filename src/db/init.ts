@@ -1,52 +1,47 @@
 import { pool } from "./pool";
 
-export async function initDb() {
-  // This will run once on startup and create tables if they don't exist
-  const sql = `
-  CREATE TABLE IF NOT EXISTS users (
-    id SERIAL PRIMARY KEY,
-    email TEXT UNIQUE NOT NULL,
-    full_name TEXT,
-    role TEXT NOT NULL DEFAULT 'subscriber',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-  );
+/**
+ * Initialize database schema.
+ * - Ensures users & rides tables exist
+ * - Ensures users table has phone + pin columns
+ */
+export async function initDb(): Promise<void> {
+  try {
+    // 1) Create base tables if they don't exist yet
+    await pool.query(`
+      -- Users table
+      CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        -- optional extra fields can go here (e.g. name, role)
+        phone TEXT,
+        pin TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );
 
-  CREATE TABLE IF NOT EXISTS subscriptions (
-    id SERIAL PRIMARY KEY,
-    user_id INTEGER NOT NULL REFERENCES users(id),
-    start_date DATE NOT NULL,
-    end_date DATE NOT NULL,
-    status TEXT NOT NULL DEFAULT 'active',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-  );
+      -- Rides table
+      CREATE TABLE IF NOT EXISTS rides (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        pickup_location TEXT NOT NULL,
+        dropoff_location TEXT NOT NULL,
+        pickup_time TIMESTAMPTZ NOT NULL,
+        ride_type TEXT NOT NULL,
+        is_fixed BOOLEAN NOT NULL DEFAULT FALSE,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );
+    `);
 
-  CREATE TABLE IF NOT EXISTS rides (
-    id SERIAL PRIMARY KEY,
-    user_id INTEGER NOT NULL REFERENCES users(id),
-    pickup_location TEXT NOT NULL,
-    dropoff_location TEXT NOT NULL,
-    pickup_time TIMESTAMPTZ NOT NULL,
-    ride_type TEXT NOT NULL,
-    is_fixed BOOLEAN NOT NULL DEFAULT false,
-    status TEXT NOT NULL DEFAULT 'pending',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-  );
+    // 2) Make sure phone + pin exist on users in case table was created earlier without them
+    await pool.query(`
+      ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS phone TEXT,
+      ADD COLUMN IF NOT EXISTS pin TEXT;
+    `);
 
-  CREATE INDEX IF NOT EXISTS idx_rides_user_time
-    ON rides (user_id, pickup_time);
-  `;
-
-  // Create tables
-  await pool.query(sql);
-
-  // Ensure a demo user with id=1 exists (for your test bookings)
-  await pool.query(
-    `
-    INSERT INTO users (id, email, full_name, role)
-    VALUES (1, 'demo@example.com', 'Demo User', 'subscriber')
-    ON CONFLICT (id) DO NOTHING;
-    `
-  );
-
-  console.log("✅ Database initialized (tables + demo user ensured).");
+    console.log("✅ Database initialized (tables ensured).");
+  } catch (err) {
+    console.error("❌ Failed to initialize database", err);
+    throw err;
+  }
 }
