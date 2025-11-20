@@ -29,28 +29,12 @@ async function hasOverlappingRide(userId: number, pickupTime: Date): Promise<boo
 // VERY simplified subscription & credits checks for demo.
 // Assumes there is ONE active subscription and unlimited credits.
 // You can extend this logic later.
-async function validateSubscriptionAndCredits(userId: number, rideType: string) {
-  const sub = await pool.query(
-    `
-    SELECT *
-    FROM subscriptions
-    WHERE user_id = $1
-      AND status = 'active'
-      AND current_date BETWEEN start_date AND end_date
-    LIMIT 1
-    `,
-    [userId]
-  );
-
-if ((sub.rowCount ?? 0) === 0) {
-  return { ok: false, code: 402, message: "No active subscription." };
-}
-
-
-  // TODO: connect to ride_credits_monthly and enforce ride_type-specific credits
-  // For now, just allow.
+async function validateSubscriptionAndCredits(_userId: number, _rideType: string) {
+  // TEMP: allow all bookings while you're testing.
+  // Later you can implement real subscription + credits logic here.
   return { ok: true };
 }
+
 
 ridesRouter.post("/", async (req: AuthRequest, res: Response) => {
   try {
