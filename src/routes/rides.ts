@@ -157,3 +157,65 @@ ridesRouter.get("/admin", async (_req: AuthRequest, res: Response) => {
     return res.status(500).json({ error: "Internal server error" });
   }
 });
+
+// Allowed ride statuses
+const ALLOWED_STATUSES = [
+  "pending",
+  "driver_en_route",
+  "arrived",
+  "in_progress",
+  "completed",
+  "cancelled",
+] as const;
+type RideStatus = (typeof ALLOWED_STATUSES)[number];
+
+/**
+ * PATCH /rides/:id/status
+ * Admin: update the status of a ride (e.g. confirm, completed, cancelled).
+ */
+ridesRouter.patch("/:id/status", async (req: AuthRequest, res: Response) => {
+  try {
+    const rideId = Number(req.params.id);
+    const { status } = req.body as { status?: string };
+
+    if (!rideId || Number.isNaN(rideId)) {
+      return res.status(400).json({ error: "Invalid ride id." });
+    }
+
+    if (!status || !ALLOWED_STATUSES.includes(status as RideStatus)) {
+      return res.status(400).json({ error: "Invalid or missing status." });
+    }
+
+    const result = await pool.query(
+      `
+      UPDATE rides
+      SET status = $1
+      WHERE id = $2
+      RETURNING
+        id,
+        user_id,
+        pickup_location,
+        dropoff_location,
+        pickup_time,
+        ride_type,
+        is_fixed,
+        status,
+        created_at
+      `,
+      [status, rideId]
+    );
+
+    if ((result.rowCount ?? 0) === 0) {
+      return res.status(404).json({ error: "Ride not found." });
+    }
+
+    // Later we can emit a Socket.IO event here to notify tracking screens.
+    // e.g. io.to(\`ride:${rideId}\`).emit("ride_status_update", { rideId, status });
+
+    return res.json(result.rows[0]);
+  } catch (err) {
+    console.error("Error in PATCH /rides/:id/status", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
