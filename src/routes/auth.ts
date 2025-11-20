@@ -37,11 +37,13 @@ authRouter.post("/login", async (req: Request, res: Response) => {
       return res.status(401).json({ error: "Invalid phone or pin." });
     }
 
-    return res.json({
-      ok: true,
-      userId: user.id,
-      phone: user.phone,
-    });
+   return res.json({
+  ok: true,
+  userId: user.id,
+  phone: user.phone,
+  email: user.email,
+});
+
   } catch (err) {
     console.error("Error in POST /auth/login", err);
     return res.status(500).json({ error: "Internal server error" });
