@@ -15,6 +15,8 @@ dotenv.config();
 const app = express();
 app.use(cors({ origin: "*", credentials: false }));
 app.use(express.json());
+app.use("/auth", authRouter);
+
 
 // attach mock auth for all API routes
 app.use(mockAuth);
