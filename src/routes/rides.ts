@@ -10,7 +10,7 @@ async function hasOverlappingRide(userId: number, pickupTime: Date): Promise<boo
   const from = new Date(pickupTime.getTime() - thirtyMinMs);
   const to = new Date(pickupTime.getTime() + thirtyMinMs);
 
-    const result = await pool.query(
+  const result = await pool.query(
     `
     SELECT 1
     FROM rides
@@ -25,47 +25,17 @@ async function hasOverlappingRide(userId: number, pickupTime: Date): Promise<boo
   return (result.rowCount ?? 0) > 0;
 }
 
-
-// VERY simplified subscription & credits checks for demo.
-// Assumes there is ONE active subscription and unlimited credits.
-// You can extend this logic later.
+// TEMP: allow all bookings while you're testing.
+// Later you can implement real subscription + credits logic here.
 async function validateSubscriptionAndCredits(_userId: number, _rideType: string) {
-  // TEMP: allow all bookings while you're testing.
-  // Later you can implement real subscription + credits logic here.
   return { ok: true };
 }
 
-
+/**
+ * POST /rides
+ * Create a new ride booking.
+ */
 ridesRouter.post("/", async (req: AuthRequest, res: Response) => {
-
-  // Admin: get all rides (for now no auth, just returns everything)
-ridesRouter.get("/admin", async (_req: AuthRequest, res: Response) => {
-  try {
-    const result = await pool.query(
-      `
-      SELECT
-        id,
-        user_id,
-        pickup_location,
-        dropoff_location,
-        pickup_time,
-        ride_type,
-        is_fixed,
-        status,
-        created_at
-      FROM rides
-      ORDER BY pickup_time ASC;
-      `
-    );
-
-    return res.json(result.rows);
-  } catch (err) {
-    console.error("Error in GET /rides/admin", err);
-    return res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-  
   try {
     const userId = req.userId;
     if (!userId) {
@@ -77,7 +47,7 @@ ridesRouter.get("/admin", async (_req: AuthRequest, res: Response) => {
       dropoff_location,
       pickup_time,
       ride_type, // 'standard' | 'grocery'
-      is_fixed,   // boolean
+      is_fixed, // boolean
     } = req.body || {};
 
     if (!pickup_location || !dropoff_location || !pickup_time || !ride_type) {
@@ -118,13 +88,12 @@ ridesRouter.get("/admin", async (_req: AuthRequest, res: Response) => {
     }
 
     // Subscription and credits
-const subValidation = await validateSubscriptionAndCredits(userId, ride_type);
-if (!subValidation.ok) {
-  return res
-    .status(400)
-    .json({ error: "Subscription or credits are not valid for this ride." });
-}
-
+    const subValidation = await validateSubscriptionAndCredits(userId, ride_type);
+    if (!subValidation.ok) {
+      return res
+        .status(400)
+        .json({ error: "Subscription or credits are not valid for this ride." });
+    }
 
     // Create ride
     const result = await pool.query(
@@ -155,6 +124,36 @@ if (!subValidation.ok) {
     return res.status(201).json(result.rows[0]);
   } catch (err) {
     console.error("Error in POST /rides", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+/**
+ * GET /rides/admin
+ * Admin view: returns all rides ordered by pickup_time.
+ */
+ridesRouter.get("/admin", async (_req: AuthRequest, res: Response) => {
+  try {
+    const result = await pool.query(
+      `
+      SELECT
+        id,
+        user_id,
+        pickup_location,
+        dropoff_location,
+        pickup_time,
+        ride_type,
+        is_fixed,
+        status,
+        created_at
+      FROM rides
+      ORDER BY pickup_time ASC;
+      `
+    );
+
+    return res.json(result.rows);
+  } catch (err) {
+    console.error("Error in GET /rides/admin", err);
     return res.status(500).json({ error: "Internal server error" });
   }
 });
