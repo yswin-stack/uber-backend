@@ -158,6 +158,44 @@ ridesRouter.get("/admin", async (_req: AuthRequest, res: Response) => {
   }
 });
 
+/**
+ * GET /rides/my
+ * Returns all rides for the current user (for the rider dashboard).
+ */
+ridesRouter.get("/my", async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.userId;
+    if (!userId) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const result = await pool.query(
+      `
+      SELECT
+        id,
+        user_id,
+        pickup_location,
+        dropoff_location,
+        pickup_time,
+        ride_type,
+        is_fixed,
+        status,
+        created_at
+      FROM rides
+      WHERE user_id = $1
+      ORDER BY pickup_time ASC;
+      `,
+      [userId]
+    );
+
+    return res.json(result.rows);
+  } catch (err) {
+    console.error("Error in GET /rides/my", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+
 // Allowed ride statuses
 const ALLOWED_STATUSES = [
   "pending",
