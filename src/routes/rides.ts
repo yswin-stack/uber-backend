@@ -10,7 +10,7 @@ async function hasOverlappingRide(userId: number, pickupTime: Date): Promise<boo
   const from = new Date(pickupTime.getTime() - thirtyMinMs);
   const to = new Date(pickupTime.getTime() + thirtyMinMs);
 
-  const result = await pool.query(
+    const result = await pool.query(
     `
     SELECT 1
     FROM rides
@@ -22,8 +22,9 @@ async function hasOverlappingRide(userId: number, pickupTime: Date): Promise<boo
     [userId, from.toISOString(), to.toISOString()]
   );
 
-  return result.rowCount > 0;
+  return (result.rowCount ?? 0) > 0;
 }
+
 
 // VERY simplified subscription & credits checks for demo.
 // Assumes there is ONE active subscription and unlimited credits.
@@ -41,9 +42,10 @@ async function validateSubscriptionAndCredits(userId: number, rideType: string) 
     [userId]
   );
 
-  if (sub.rowCount === 0) {
-    return { ok: false, code: 402, message: "No active subscription." };
-  }
+if ((sub.rowCount ?? 0) === 0) {
+  return { ok: false, code: 402, message: "No active subscription." };
+}
+
 
   // TODO: connect to ride_credits_monthly and enforce ride_type-specific credits
   // For now, just allow.
