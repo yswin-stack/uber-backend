@@ -5,9 +5,9 @@ import dotenv from "dotenv";
 import { Server as SocketIOServer } from "socket.io";
 
 import { initDb } from "./db/init";
-import ridesRouter from "./routes/rides";
-import authRouter from "./routes/auth";
-import devRouter from "./routes/dev";
+import { ridesRouter } from "./routes/rides";
+import { authRouter } from "./routes/auth";
+import { devRouter } from "./routes/dev";
 
 dotenv.config();
 
