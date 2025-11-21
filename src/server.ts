@@ -5,9 +5,9 @@ import dotenv from "dotenv";
 import { Server as SocketIOServer } from "socket.io";
 
 import { initDb } from "./db/init";
-import { ridesRouter } from "./routes/rides";
-import { authRouter } from "./routes/auth";
-import { devRouter } from "./routes/dev";
+import { ridesRouter } from "./routes/rides";     // NAMED EXPORT
+import authRouter from "./routes/auth";           // DEFAULT EXPORT
+import devRouter from "./routes/dev";             // DEFAULT EXPORT
 
 dotenv.config();
 
@@ -58,28 +58,27 @@ const io = new SocketIOServer(httpServer, {
 io.on("connection", (socket) => {
   console.log("Socket connected:", socket.id);
 
-  // Rider or driver joins a specific ride room
   socket.on("join_ride", (data: { rideId: any }) => {
     try {
       const rideIdNum = Number(data.rideId);
       if (!rideIdNum || Number.isNaN(rideIdNum)) {
-        console.warn("join_ride with invalid rideId:", data);
+        console.warn("join_ride invalid rideId:", data);
         return;
       }
+
       const room = `ride_${rideIdNum}`;
       socket.join(room);
       console.log(`Socket ${socket.id} joined room ${room}`);
     } catch (err) {
-      console.error("Error in join_ride handler:", err);
+      console.error("join_ride error:", err);
     }
   });
 
-  // Driver sends location_update → broadcast to everyone tracking that ride
   socket.on("location_update", (payload: { rideId: any; lat: number; lng: number }) => {
     try {
       const rideIdNum = Number(payload.rideId);
       if (!rideIdNum || Number.isNaN(rideIdNum)) {
-        console.warn("location_update with invalid rideId:", payload);
+        console.warn("location_update invalid rideId:", payload);
         return;
       }
 
@@ -91,9 +90,9 @@ io.on("connection", (socket) => {
       };
 
       io.to(room).emit("location_update", out);
-      console.log("Broadcast location_update to", room, out);
+      console.log("Broadcast →", room, out);
     } catch (err) {
-      console.error("Error in location_update handler:", err);
+      console.error("location_update error:", err);
     }
   });
 
@@ -108,13 +107,13 @@ io.on("connection", (socket) => {
 async function start() {
   try {
     await initDb();
-    console.log("✅ Database initialized (tables ensured).");
+    console.log("✅ Database initialized");
 
     httpServer.listen(PORT, () => {
-      console.log(`🚀 Server listening on http://localhost:${PORT}`);
+      console.log(`🚀 Server running on http://localhost:${PORT}`);
     });
   } catch (err) {
-    console.error("❌ Failed to initialize database", err);
+    console.error("❌ DB init failed", err);
     process.exit(1);
   }
 }
