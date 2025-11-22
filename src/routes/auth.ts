@@ -183,7 +183,6 @@ authRouter.post("/login", async (req, res) => {
 /**
  * GET /auth/me
  * Reads x-user-id header and returns basic profile.
- * (Used by frontend dashboard later if you want.)
  */
 authRouter.get("/me", async (req, res) => {
   try {
@@ -221,6 +220,69 @@ authRouter.get("/me", async (req, res) => {
     });
   } catch (err) {
     console.error("Error in /auth/me:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+/**
+ * PUT /auth/profile
+ * Updates name/email/phone for logged-in user.
+ * Body: { name?, email?, phone? }
+ * Header: x-user-id
+ */
+authRouter.put("/profile", async (req, res) => {
+  try {
+    const userIdHeader = req.header("x-user-id");
+    const userIdNum = userIdHeader ? Number(userIdHeader) : NaN;
+
+    if (!userIdHeader || Number.isNaN(userIdNum)) {
+      return res.status(401).json({ error: "Missing or invalid x-user-id header." });
+    }
+
+    const { name, email, phone } = req.body as {
+      name?: string;
+      email?: string;
+      phone?: string;
+    };
+
+    if (!email && !phone) {
+      return res
+        .status(400)
+        .json({ error: "Please keep at least an email or a phone number." });
+    }
+
+    const normalizedPhone = phone ? normalizePhone(phone) : null;
+    const finalEmail = ensureEmail(email, normalizedPhone ?? undefined);
+
+    const result = await pool.query<UserRow>(
+      `
+      UPDATE users
+      SET name = $1,
+          email = $2,
+          phone = $3
+      WHERE id = $4
+      RETURNING id, name, email, phone, role
+    `,
+      [name ?? null, finalEmail, normalizedPhone, userIdNum]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "User not found." });
+    }
+
+    const user = result.rows[0];
+
+    return res.json({
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+        role: user.role,
+      },
+    });
+  } catch (err) {
+    console.error("Error in /auth/profile:", err);
     return res.status(500).json({ error: "Internal server error" });
   }
 });
