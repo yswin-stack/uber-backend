@@ -1,38 +1,112 @@
 import { pool } from "./pool";
 
-/**
- * Initialize DB:
- * - Ensure users table exists.
- * - Ensure name, work_address, school_address columns exist on users.
- *
- * This runs automatically on server start, so you don't need to run SQL manually.
- */
 export async function initDb() {
+  // This function runs at server start and ensures all tables/columns exist.
+  // We use IF NOT EXISTS so it is safe to run repeatedly.
+
+  const client = await pool.connect();
   try {
-    // 1) Make sure users table exists (if it's already there, this does nothing)
-    await pool.query(`
+    await client.query("BEGIN");
+
+    // USERS
+    await client.query(`
       CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
-        email TEXT NOT NULL,
-        phone TEXT,
-        pin TEXT NOT NULL,
-        role TEXT DEFAULT 'subscriber'
+        email TEXT,
+        name TEXT,
+        role TEXT NOT NULL DEFAULT 'subscriber',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        phone TEXT UNIQUE,
+        pin TEXT NOT NULL
       );
     `);
 
-    // 2) Add extra columns if they don't exist yet
-    await pool.query(`
+    // Ensure role column exists
+    await client.query(`
       ALTER TABLE users
-        ADD COLUMN IF NOT EXISTS name TEXT,
-        ADD COLUMN IF NOT EXISTS work_address TEXT,
-        ADD COLUMN IF NOT EXISTS school_address TEXT;
+      ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'subscriber';
     `);
 
-    console.log("✅ Database initialized (users + shortcut columns ensured).");
+    // RIDES
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS rides (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        pickup_location TEXT NOT NULL,
+        dropoff_location TEXT NOT NULL,
+        pickup_lat DOUBLE PRECISION,
+        pickup_lng DOUBLE PRECISION,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        pickup_time TIMESTAMPTZ,
+        ride_type TEXT NOT NULL DEFAULT 'standard', -- 'standard' | 'grocery'
+        status TEXT NOT NULL DEFAULT 'pending',     -- pending, confirmed, driver_en_route, arrived, in_progress, completed, cancelled
+        driver_id INTEGER REFERENCES users(id),
+        completed_at TIMESTAMPTZ
+      );
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_rides_user_id ON rides(user_id);
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_rides_pickup_time ON rides(pickup_time);
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_rides_status ON rides(status);
+    `);
+
+    // MONTHLY CREDITS
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS ride_credits_monthly (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        month_start DATE NOT NULL,
+        standard_total INTEGER NOT NULL DEFAULT 40,
+        standard_used INTEGER NOT NULL DEFAULT 0,
+        grocery_total INTEGER NOT NULL DEFAULT 4,
+        grocery_used INTEGER NOT NULL DEFAULT 0,
+        UNIQUE (user_id, month_start)
+      );
+    `);
+
+    // WEEKLY SCHEDULE TEMPLATE
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS weekly_schedule (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        day_of_week INTEGER NOT NULL, -- 0=Sunday ... 6=Saturday
+        -- desired arrival window (we'll convert to pickup_time when generating rides)
+        arrival_start TIME NOT NULL,
+        arrival_end TIME NOT NULL,
+        pickup_address TEXT NOT NULL,
+        dropoff_address TEXT NOT NULL,
+        direction TEXT NOT NULL CHECK (direction IN ('to_work', 'to_home')),
+        active BOOLEAN NOT NULL DEFAULT TRUE
+      );
+    `);
+
+    // NOTIFICATIONS (for logging + possible in-app later)
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS notifications (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        ride_id INTEGER REFERENCES rides(id) ON DELETE CASCADE,
+        type TEXT NOT NULL, -- sms, in_app
+        channel TEXT NOT NULL, -- 'twilio', 'ui'
+        message TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+
+    await client.query("COMMIT");
+    console.log("✅ Database initialized (tables ensured).");
   } catch (err) {
+    await client.query("ROLLBACK");
     console.error("❌ Failed to initialize database", err);
     throw err;
+  } finally {
+    client.release();
   }
 }
-
-export default initDb;
