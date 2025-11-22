@@ -33,20 +33,23 @@ function normalizePhone(raw: string): string {
 // POST /auth/register
 authRouter.post("/register", async (req: Request, res: Response) => {
   try {
-    let { phone, pin, email, name } = req.body as {
+    const body = req.body as {
       phone?: string;
       pin?: string;
       email?: string;
       name?: string;
     };
 
-    if (!phone || !pin) {
+    const phoneRaw = body.phone;
+    const pin = body.pin;
+    const email: string | undefined = body.email?.trim() || undefined;
+    const name: string | undefined = body.name?.trim() || undefined;
+
+    if (!phoneRaw || !pin) {
       return res.status(400).json({ error: "phone and pin are required" });
     }
 
-    const normalizedPhone = normalizePhone(phone);
-    email = email || null;
-    name = name || null;
+    const normalizedPhone = normalizePhone(phoneRaw);
 
     // Check if already exists
     const existing = await pool.query(
@@ -54,7 +57,9 @@ authRouter.post("/register", async (req: Request, res: Response) => {
       [normalizedPhone]
     );
     if (existing.rowCount && existing.rowCount > 0) {
-      return res.status(400).json({ error: "User already exists with this phone." });
+      return res
+        .status(400)
+        .json({ error: "User already exists with this phone." });
     }
 
     // Decide role: admin only for that exact special phone, otherwise subscriber
@@ -83,23 +88,28 @@ authRouter.post("/register", async (req: Request, res: Response) => {
     });
   } catch (err) {
     console.error("Error in /auth/register:", err);
-    return res.status(500).json({ error: "Internal server error during signup." });
+    return res
+      .status(500)
+      .json({ error: "Internal server error during signup." });
   }
 });
 
 // POST /auth/login
 authRouter.post("/login", async (req: Request, res: Response) => {
   try {
-    let { phone, pin } = req.body as {
+    const body = req.body as {
       phone?: string;
       pin?: string;
     };
 
-    if (!phone || !pin) {
+    const phoneRaw = body.phone;
+    const pin = body.pin;
+
+    if (!phoneRaw || !pin) {
       return res.status(400).json({ error: "phone and pin are required" });
     }
 
-    const normalizedPhone = normalizePhone(phone);
+    const normalizedPhone = normalizePhone(phoneRaw);
 
     const result = await pool.query(
       "SELECT id, email, name, role, phone, pin FROM users WHERE phone = $1",
@@ -118,7 +128,9 @@ authRouter.post("/login", async (req: Request, res: Response) => {
 
     // Auto-upgrade YOU to admin if for some reason role isn't set
     if (normalizedPhone === ADMIN_PHONE && user.role !== "admin") {
-      await pool.query("UPDATE users SET role = 'admin' WHERE id = $1", [user.id]);
+      await pool.query("UPDATE users SET role = 'admin' WHERE id = $1", [
+        user.id,
+      ]);
       user.role = "admin";
     }
 
@@ -133,7 +145,9 @@ authRouter.post("/login", async (req: Request, res: Response) => {
     });
   } catch (err) {
     console.error("Error in /auth/login:", err);
-    return res.status(500).json({ error: "Internal server error during login." });
+    return res
+      .status(500)
+      .json({ error: "Internal server error during login." });
   }
 });
 
