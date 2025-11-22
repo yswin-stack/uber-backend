@@ -41,6 +41,7 @@ app.use("/schedule", scheduleRouter);
 app.use("/credits", creditsRouter);
 app.use("/dev", devRouter);
 app.use("/admin", adminRouter); // ⬅️ add this line
+app.use("/user", userRouter);
 
 // SOCKET.IO for live driver tracking
 io.on("connection", (socket) => {
