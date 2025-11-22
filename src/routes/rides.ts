@@ -1,214 +1,302 @@
-import { Router } from "express";
+import { Router, Request, Response } from "express";
 import { pool } from "../db/pool";
+import { consumeCreditForRide, getCreditsSummary } from "../lib/credits";
+import { sendSmsOrLog } from "../lib/notifications";
 
 export const ridesRouter = Router();
 
-type RideRow = {
-  id: number;
-  user_id: number;
-  pickup_location: string;
-  dropoff_location: string;
-  pickup_time: string | null;
-  status: string;
-};
+const MAX_RIDES_PER_SLOT = 4; // adjust capacity per 15-min slot
 
-/**
- * Helper: read userId from x-user-id header
- */
-function getUserIdFromHeader(req: any): number | null {
+function getUserIdFromHeader(req: Request): number | null {
   const header = req.header("x-user-id");
   if (!header) return null;
-  const n = Number(header);
-  if (!n || Number.isNaN(n)) return null;
-  return n;
+  const id = parseInt(header, 10);
+  return Number.isNaN(id) ? null : id;
 }
 
-/**
- * POST /rides
- * Create a new ride for the logged-in user.
- *
- * Expects JSON body with at least:
- *  - pickupLocation OR pickup_address
- *  - dropoffLocation OR dropoff_address
- *  - pickupTime (ISO string)  (optional, can be null for ASAP)
- *
- * Header:
- *  - x-user-id: user id from auth
- */
-ridesRouter.post("/", async (req, res) => {
-  try {
-    const userId = getUserIdFromHeader(req);
-    if (!userId) {
-      return res.status(401).json({ error: "Missing or invalid x-user-id header." });
+// Helper: 15-minute slot rounding
+function getSlotKey(date: Date): { slotStart: Date; slotLabel: string } {
+  const d = new Date(date);
+  const minutes = d.getMinutes();
+  const slotMinutes = Math.floor(minutes / 15) * 15;
+  d.setMinutes(slotMinutes, 0, 0);
+  const slotStart = d;
+  const slotLabel = slotStart.toISOString();
+  return { slotStart, slotLabel };
+}
+
+// Helper: find next slot with capacity
+async function findNextAvailableSlot(
+  pickupLocation: string,
+  dropoffLocation: string,
+  desiredTime: Date
+): Promise<{ slotTime: Date; count: number }> {
+  // For simplicity, we just check next 8 slots (2 hours) in 15 min increments
+  let checkTime = new Date(desiredTime);
+  for (let i = 0; i < 8; i++) {
+    const { slotStart } = getSlotKey(checkTime);
+
+    const result = await pool.query(
+      `
+      SELECT COUNT(*) AS count
+      FROM rides
+      WHERE pickup_time >= $1
+        AND pickup_time < $1 + INTERVAL '15 minutes'
+        AND status NOT IN ('cancelled')
+    `,
+      [slotStart.toISOString()]
+    );
+
+    const count = parseInt(result.rows[0].count, 10);
+    if (count < MAX_RIDES_PER_SLOT) {
+      return { slotTime: slotStart, count };
     }
 
-    const body = req.body || {};
+    checkTime = new Date(slotStart.getTime() + 15 * 60 * 1000);
+  }
 
-    const pickupLocation: string =
-      body.pickupLocation ||
-      body.pickup_address ||
-      body.pickup_location ||
-      "";
-    const dropoffLocation: string =
-      body.dropoffLocation ||
-      body.dropoff_address ||
-      body.dropoff_location ||
-      "";
-    const pickupTimeIso: string | null =
-      body.pickupTime || body.pickup_time || null;
+  // If all full, just return original time as fallback
+  return { slotTime: desiredTime, count: MAX_RIDES_PER_SLOT };
+}
 
-    if (!pickupLocation || !dropoffLocation) {
-      return res.status(400).json({
-        error: "Missing required fields: pickup and dropoff address.",
+// 1) BOOK A RIDE
+ridesRouter.post("/", async (req: Request, res: Response) => {
+  const userId = getUserIdFromHeader(req);
+  if (!userId) {
+    return res.status(401).json({ error: "Missing or invalid x-user-id" });
+  }
+
+  try {
+    const {
+      pickup_location,
+      dropoff_location,
+      pickup_lat,
+      pickup_lng,
+      ride_type,
+      pickup_time,
+    } = req.body as {
+      pickup_location?: string;
+      dropoff_location?: string;
+      pickup_lat?: number;
+      pickup_lng?: number;
+      ride_type?: "standard" | "grocery";
+      pickup_time?: string | null;
+    };
+
+    if (!pickup_location || !dropoff_location) {
+      return res
+        .status(400)
+        .json({ error: "Missing required fields (pickup/dropoff)." });
+    }
+
+    const rideType = ride_type || "standard";
+
+    // Determine pickup time: now or supplied
+    const now = new Date();
+    let pickupTime: Date | null = null;
+
+    if (pickup_time) {
+      pickupTime = new Date(pickup_time);
+      if (isNaN(pickupTime.getTime())) {
+        return res.status(400).json({ error: "Invalid pickup_time." });
+      }
+    } else {
+      pickupTime = now;
+    }
+
+    if (!pickupTime) {
+      return res.status(400).json({ error: "Unable to determine pickup time." });
+    }
+
+    // Capacity check: 15 min slots
+    const { slotStart } = getSlotKey(pickupTime);
+    const countResult = await pool.query(
+      `
+      SELECT COUNT(*) AS count
+      FROM rides
+      WHERE pickup_time >= $1
+        AND pickup_time < $1 + INTERVAL '15 minutes'
+        AND status NOT IN ('cancelled')
+    `,
+      [slotStart.toISOString()]
+    );
+    const count = parseInt(countResult.rows[0].count, 10);
+
+    if (count >= MAX_RIDES_PER_SLOT) {
+      const nextSlot = await findNextAvailableSlot(
+        pickup_location,
+        dropoff_location,
+        pickupTime
+      );
+      return res.status(409).json({
+        error: "Slot full",
+        code: "SLOT_FULL",
+        suggested_pickup_time: nextSlot.slotTime.toISOString(),
       });
     }
 
-    const insert = await pool.query<RideRow>(
+    // Check & consume credit
+    const creditResult = await consumeCreditForRide(userId, rideType, now);
+    if (!creditResult.ok) {
+      return res
+        .status(402)
+        .json({ error: creditResult.message || "No credits left." });
+    }
+
+    // Create ride
+    const insert = await pool.query(
       `
-      INSERT INTO rides (user_id, pickup_location, dropoff_location, pickup_time, status)
-      VALUES ($1, $2, $3, $4, 'pending')
-      RETURNING id, user_id, pickup_location, dropoff_location, pickup_time, status
+      INSERT INTO rides (
+        user_id,
+        pickup_location,
+        dropoff_location,
+        pickup_lat,
+        pickup_lng,
+        pickup_time,
+        ride_type,
+        status
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
+      RETURNING *
     `,
-      [userId, pickupLocation, dropoffLocation, pickupTimeIso]
+      [
+        userId,
+        pickup_location,
+        dropoff_location,
+        pickup_lat ?? null,
+        pickup_lng ?? null,
+        pickupTime.toISOString(),
+        rideType,
+      ]
     );
 
     const ride = insert.rows[0];
 
-    return res.status(201).json({
-      ride,
-    });
-  } catch (err) {
-    console.error("Error in POST /rides:", err);
-    return res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-/**
- * GET /rides/user
- * Returns up to 100 rides for the logged-in user as JSON.
- *
- * Header:
- *  - x-user-id
- */
-ridesRouter.get("/user", async (req, res) => {
-  try {
-    const userId = getUserIdFromHeader(req);
-    if (!userId) {
-      return res.status(401).json({ error: "Missing or invalid x-user-id header." });
-    }
-
-    const result = await pool.query<RideRow>(
-      `
-      SELECT
-        id,
-        user_id,
-        pickup_location,
-        dropoff_location,
-        pickup_time,
-        status
-      FROM rides
-      WHERE user_id = $1
-      ORDER BY pickup_time NULLS LAST, id DESC
-      LIMIT 100
-    `,
+    // Get user phone
+    const userResult = await pool.query(
+      `SELECT phone FROM users WHERE id = $1`,
       [userId]
     );
+    const phone = userResult.rows[0]?.phone || null;
 
-    return res.json({ rides: result.rows });
-  } catch (err) {
-    console.error("Error in GET /rides/user:", err);
-    return res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-/**
- * GET /rides/:id
- * Fetch a single ride by id.
- */
-ridesRouter.get("/:id", async (req, res) => {
-  try {
-    const idNum = Number(req.params.id);
-    if (!idNum || Number.isNaN(idNum)) {
-      return res.status(400).json({ error: "Invalid ride id." });
-    }
-
-    const result = await pool.query<RideRow>(
-      `
-      SELECT
-        id,
-        user_id,
-        pickup_location,
-        dropoff_location,
-        pickup_time,
-        status
-      FROM rides
-      WHERE id = $1
-      LIMIT 1
-    `,
-      [idNum]
+    // Notify user: ride requested/confirmed
+    const appBase = process.env.APP_BASE_URL || "";
+    const trackUrl = appBase
+      ? `${appBase}/rides/${ride.id}/track`
+      : `Ride #${ride.id}`;
+    await sendSmsOrLog(
+      userId,
+      ride.id,
+      phone,
+      `Your ride request #${ride.id} is received and pending confirmation. ${trackUrl}`
     );
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: "Ride not found." });
-    }
-
-    return res.json({ ride: result.rows[0] });
-  } catch (err) {
-    console.error("Error in GET /rides/:id:", err);
-    return res.status(500).json({ error: "Internal server error" });
+    res.json({ ride });
+  } catch (err: any) {
+    console.error("Error in POST /rides", err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
-/**
- * GET /rides/:id/status
- * Simple status endpoint (used by admin/driver UI to poll)
- */
-ridesRouter.get("/:id/status", async (req, res) => {
-  try {
-    const idNum = Number(req.params.id);
-    if (!idNum || Number.isNaN(idNum)) {
-      return res.status(400).json({ error: "Invalid ride id." });
-    }
+// 2) GET RIDES FOR LOGGED-IN RIDER (upcoming + history)
+ridesRouter.get("/user", async (req: Request, res: Response) => {
+  const userId = getUserIdFromHeader(req);
+  if (!userId) {
+    return res.status(401).json({ error: "Missing or invalid x-user-id" });
+  }
 
-    const result = await pool.query<{ status: string }>(
+  try {
+    const now = new Date().toISOString();
+
+    const upcomingResult = await pool.query(
       `
-      SELECT status
+      SELECT *
       FROM rides
-      WHERE id = $1
-      LIMIT 1
+      WHERE user_id = $1
+        AND (pickup_time IS NULL OR pickup_time >= $2)
+      ORDER BY pickup_time ASC NULLS LAST, created_at DESC
+      LIMIT 50
     `,
-      [idNum]
+      [userId, now]
     );
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: "Ride not found." });
-    }
+    const historyResult = await pool.query(
+      `
+      SELECT *
+      FROM rides
+      WHERE user_id = $1
+        AND (pickup_time IS NOT NULL AND pickup_time < $2
+             OR status IN ('completed', 'cancelled'))
+      ORDER BY pickup_time DESC NULLS LAST, created_at DESC
+      LIMIT 50
+    `,
+      [userId, now]
+    );
 
-    return res.json({ status: result.rows[0].status });
-  } catch (err) {
-    console.error("Error in GET /rides/:id/status:", err);
-    return res.status(500).json({ error: "Internal server error" });
+    const credits = await getCreditsSummary(userId);
+
+    res.json({
+      upcoming: upcomingResult.rows,
+      history: historyResult.rows,
+      credits,
+    });
+  } catch (err: any) {
+    console.error("Error in GET /rides/user", err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
-/**
- * PATCH /rides/:id/status
- * Update ride status (e.g. driver_en_route, arrived, in_progress, completed)
- * Body: { status: string }
- */
-ridesRouter.patch("/:id/status", async (req, res) => {
+// 3) DRIVER VIEW: GET ALL ACTIVE RIDES FOR TODAY + UPCOMING
+ridesRouter.get("/driver", async (req: Request, res: Response) => {
+  const userId = getUserIdFromHeader(req);
+  if (!userId) {
+    return res.status(401).json({ error: "Missing or invalid x-user-id" });
+  }
+
   try {
-    const idNum = Number(req.params.id);
-    if (!idNum || Number.isNaN(idNum)) {
-      return res.status(400).json({ error: "Invalid ride id." });
-    }
+    // You might also validate that this user is actually a driver (role='driver')
+    const now = new Date();
+    const startOfDay = new Date(now);
+    startOfDay.setHours(0, 0, 0, 0);
 
-    const { status } = req.body as { status?: string };
-    if (!status || typeof status !== "string") {
-      return res.status(400).json({ error: "Missing or invalid status." });
-    }
+    const result = await pool.query(
+      `
+      SELECT r.*,
+             u.name AS rider_name,
+             u.phone AS rider_phone
+      FROM rides r
+      JOIN users u ON u.id = r.user_id
+      WHERE r.pickup_time >= $1
+        AND r.status NOT IN ('completed', 'cancelled')
+      ORDER BY r.pickup_time ASC
+    `,
+      [startOfDay.toISOString()]
+    );
 
-    const allowedStatuses = [
+    res.json({ rides: result.rows });
+  } catch (err: any) {
+    console.error("Error in GET /rides/driver", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// 4) DRIVER/ADMIN STATUS UPDATE (Arrived → Start → Complete, etc.)
+ridesRouter.patch("/:id/status", async (req: Request, res: Response) => {
+  const rideId = parseInt(req.params.id, 10);
+  if (Number.isNaN(rideId)) {
+    return res.status(400).json({ error: "Invalid ride id" });
+  }
+
+  const userId = getUserIdFromHeader(req);
+  if (!userId) {
+    return res.status(401).json({ error: "Missing or invalid x-user-id" });
+  }
+
+  const { status } = req.body as { status?: string };
+
+  if (
+    !status ||
+    ![
       "pending",
       "confirmed",
       "driver_en_route",
@@ -216,31 +304,58 @@ ridesRouter.patch("/:id/status", async (req, res) => {
       "in_progress",
       "completed",
       "cancelled",
-    ];
+    ].includes(status)
+  ) {
+    return res.status(400).json({ error: "Invalid status" });
+  }
 
-    if (!allowedStatuses.includes(status)) {
-      return res
-        .status(400)
-        .json({ error: "Invalid status value.", allowedStatuses });
-    }
-
-    const update = await pool.query<RideRow>(
+  try {
+    // Update ride
+    const update = await pool.query(
       `
       UPDATE rides
-      SET status = $1
-      WHERE id = $2
-      RETURNING id, user_id, pickup_location, dropoff_location, pickup_time, status
+      SET status = $1,
+          driver_id = COALESCE(driver_id, $2),
+          completed_at = CASE WHEN $1 = 'completed' THEN NOW() ELSE completed_at END
+      WHERE id = $3
+      RETURNING *
     `,
-      [status, idNum]
+      [status, userId, rideId]
     );
 
-    if (update.rows.length === 0) {
-      return res.status(404).json({ error: "Ride not found." });
+    if (update.rowCount === 0) {
+      return res.status(404).json({ error: "Ride not found" });
     }
 
-    return res.json({ ride: update.rows[0] });
-  } catch (err) {
-    console.error("Error in PATCH /rides/:id/status:", err);
-    return res.status(500).json({ error: "Internal server error" });
+    const ride = update.rows[0];
+
+    // Grab rider info
+    const userResult = await pool.query(
+      `SELECT phone FROM users WHERE id = $1`,
+      [ride.user_id]
+    );
+    const phone = userResult.rows[0]?.phone || null;
+
+    let message: string | null = null;
+    if (status === "confirmed") {
+      message = `Your ride #${ride.id} is confirmed.`;
+    } else if (status === "driver_en_route") {
+      message = `Your driver is en route for ride #${ride.id}.`;
+    } else if (status === "arrived") {
+      message = `Your driver has arrived for ride #${ride.id}.`;
+    } else if (status === "in_progress") {
+      message = `Your ride #${ride.id} is in progress.`;
+    } else if (status === "completed") {
+      message = `Your ride #${ride.id} is completed.`;
+    }
+
+    if (message) {
+      await sendSmsOrLog(ride.user_id, ride.id, phone, message);
+    }
+
+    res.json({ ride });
+  } catch (err: any) {
+    console.error("Error in PATCH /rides/:id/status", err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
