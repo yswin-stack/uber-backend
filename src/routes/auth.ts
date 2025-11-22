@@ -5,7 +5,6 @@ const authRouter = Router();
 
 type UserRow = {
   id: number;
-  name: string | null;
   email: string;
   phone: string | null;
   pin: string;
@@ -64,11 +63,10 @@ function ensureEmail(email: string | undefined, phone: string | undefined): stri
 
 /**
  * POST /auth/signup
- * Body: { name?, email?, phone?, pin }
+ * Body: { name?, email?, phone, pin }
  *
- * - At least ONE of email or phone is required.
- * - Phone is what we actually care about (for SMS), but we don’t force it here
- *   in case your UI changes.
+ * - PHONE is required (for SMS and identity)
+ * - Email is optional
  */
 authRouter.post("/signup", async (req, res) => {
   try {
@@ -79,27 +77,26 @@ authRouter.post("/signup", async (req, res) => {
       pin?: string;
     };
 
-    if (!email && !phone) {
+    if (!phone || phone.trim() === "") {
       return res
         .status(400)
-        .json({ error: "Please provide at least a phone number or an email." });
+        .json({ error: "Phone number is required to create an account." });
     }
 
     if (!pin || typeof pin !== "string" || pin.length !== 4) {
       return res.status(400).json({ error: "PIN must be a 4-digit string." });
     }
 
-    const normalizedPhone =
-      phone && phone.trim() !== "" ? normalizePhone(phone) : null;
-    const finalEmail = ensureEmail(email, normalizedPhone ?? undefined);
+    const normalizedPhone = normalizePhone(phone);
+    const finalEmail = ensureEmail(email, normalizedPhone);
 
     // Check if user already exists by phone OR email
     const existing = await pool.query<UserRow>(
       `
-      SELECT id, name, email, phone, pin, role
+      SELECT id, email, phone, pin, role
       FROM users
       WHERE email = $1
-         OR ($2 IS NOT NULL AND phone = $2)
+         OR phone = $2
       LIMIT 1
     `,
       [finalEmail, normalizedPhone]
@@ -114,19 +111,20 @@ authRouter.post("/signup", async (req, res) => {
 
     const insert = await pool.query<UserRow>(
       `
-      INSERT INTO users (email, phone, name, pin, role)
-      VALUES ($1, $2, $3, $4, 'subscriber')
-      RETURNING id, name, email, phone, role
+      INSERT INTO users (email, phone, pin, role)
+      VALUES ($1, $2, $3, 'subscriber')
+      RETURNING id, email, phone, pin, role
     `,
-      [finalEmail, normalizedPhone, name ?? null, pin]
+      [finalEmail, normalizedPhone, pin]
     );
 
     const user = insert.rows[0];
 
+    // We don't have a 'name' column in DB, so we only return null here.
     return res.json({
       user: {
         id: user.id,
-        name: user.name,
+        name: name || null, // for frontend greeting (not persisted in DB)
         email: user.email,
         phone: user.phone,
         role: user.role,
@@ -134,9 +132,6 @@ authRouter.post("/signup", async (req, res) => {
     });
   } catch (err: any) {
     console.error("Error in /auth/signup:", err);
-
-    // For now we pack error details into the main error string
-    // so you can see EXACTLY what Postgres is complaining about.
     const msg = err?.message || String(err);
     return res.status(500).json({
       error: `Internal server error during signup: ${msg}`,
@@ -177,7 +172,7 @@ authRouter.post("/login", async (req, res) => {
       const email = raw.toLowerCase();
       const result = await pool.query<UserRow>(
         `
-        SELECT id, name, email, phone, pin, role
+        SELECT id, email, phone, pin, role
         FROM users
         WHERE email = $1
         LIMIT 1
@@ -192,7 +187,7 @@ authRouter.post("/login", async (req, res) => {
       // 1) Try by phone column
       let result = await pool.query<UserRow>(
         `
-        SELECT id, name, email, phone, pin, role
+        SELECT id, email, phone, pin, role
         FROM users
         WHERE phone = $1
         LIMIT 1
@@ -207,7 +202,7 @@ authRouter.post("/login", async (req, res) => {
         const aliasEmail = ensureEmail(undefined, normalizedPhone);
         result = await pool.query<UserRow>(
           `
-          SELECT id, name, email, phone, pin, role
+          SELECT id, email, phone, pin, role
           FROM users
           WHERE email = $1
           LIMIT 1
@@ -231,7 +226,7 @@ authRouter.post("/login", async (req, res) => {
     return res.json({
       user: {
         id: userRow.id,
-        name: userRow.name,
+        name: null, // no name in DB yet
         email: userRow.email,
         phone: userRow.phone,
         role: userRow.role,
@@ -261,7 +256,7 @@ authRouter.get("/me", async (req, res) => {
 
     const result = await pool.query<UserRow>(
       `
-      SELECT id, name, email, phone, role
+      SELECT id, email, phone, pin, role
       FROM users
       WHERE id = $1
       LIMIT 1
@@ -278,7 +273,7 @@ authRouter.get("/me", async (req, res) => {
     return res.json({
       user: {
         id: user.id,
-        name: user.name,
+        name: null,
         email: user.email,
         phone: user.phone,
         role: user.role,
@@ -295,9 +290,11 @@ authRouter.get("/me", async (req, res) => {
 
 /**
  * PUT /auth/profile
- * Updates name/email/phone for logged-in user.
+ * Updates email/phone for logged-in user.
  * Body: { name?, email?, phone? }
  * Header: x-user-id
+ *
+ * (We ignore 'name' here because DB has no name column.)
  */
 authRouter.put("/profile", async (req, res) => {
   try {
@@ -327,13 +324,12 @@ authRouter.put("/profile", async (req, res) => {
     const result = await pool.query<UserRow>(
       `
       UPDATE users
-      SET name = $1,
-          email = $2,
-          phone = $3
-      WHERE id = $4
-      RETURNING id, name, email, phone, role
+      SET email = $1,
+          phone = $2
+      WHERE id = $3
+      RETURNING id, email, phone, pin, role
     `,
-      [name ?? null, finalEmail, normalizedPhone, userIdNum]
+      [finalEmail, normalizedPhone, userIdNum]
     );
 
     if (result.rows.length === 0) {
@@ -345,7 +341,7 @@ authRouter.put("/profile", async (req, res) => {
     return res.json({
       user: {
         id: user.id,
-        name: user.name,
+        name: name || null, // not stored in DB, but sent back for UI
         email: user.email,
         phone: user.phone,
         role: user.role,
