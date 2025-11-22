@@ -32,14 +32,19 @@ function normalizePhone(raw: string): string {
  */
 function ensureEmail(email: string | undefined, phone: string | undefined): string {
   if (email && email.trim() !== "") return email.trim().toLowerCase();
-
-  const phoneId = phone ? normalizePhone(phone) : `user${Date.now()}`;
-  return `${phoneId.replace("+", "")}@local`;
+  if (!phone) {
+    // Fallback if called without phone, should be rare
+    return `user${Date.now()}@local`;
+  }
+  const p = normalizePhone(phone);
+  return `${p.replace("+", "")}@local`;
 }
 
 /**
  * POST /auth/signup
- * Body: { name?, email?, phone?, pin }
+ * Body: { name?, email?, phone, pin }
+ * - PHONE is required (for SMS + identity)
+ * - Email is optional
  */
 authRouter.post("/signup", async (req, res) => {
   try {
@@ -50,33 +55,32 @@ authRouter.post("/signup", async (req, res) => {
       pin?: string;
     };
 
+    if (!phone || typeof phone !== "string" || phone.trim() === "") {
+      return res.status(400).json({ error: "Phone number is required." });
+    }
+
     if (!pin || typeof pin !== "string" || pin.length !== 4) {
       return res.status(400).json({ error: "PIN must be a 4-digit string." });
     }
 
-    if (!email && !phone) {
-      return res
-        .status(400)
-        .json({ error: "Please provide an email or a phone number." });
-    }
+    const normalizedPhone = normalizePhone(phone);
+    const finalEmail = ensureEmail(email, normalizedPhone);
 
-    const normalizedPhone = phone ? normalizePhone(phone) : null;
-    const finalEmail = ensureEmail(email, normalizedPhone ?? undefined);
-
-    // Check if user already exists by email OR phone
+    // Check if user already exists by phone OR email
     const existing = await pool.query<UserRow>(
       `
       SELECT id, name, email, phone, pin, role
       FROM users
-      WHERE email = $1 OR (phone IS NOT NULL AND phone = $2)
+      WHERE phone = $1 OR email = $2
       LIMIT 1
     `,
-      [finalEmail, normalizedPhone]
+      [normalizedPhone, finalEmail]
     );
 
     if (existing.rows.length > 0) {
       return res.status(400).json({
-        error: "An account with this email or phone already exists. Please log in instead.",
+        error:
+          "An account with this phone or email already exists. Please log in instead.",
       });
     }
 
@@ -109,7 +113,12 @@ authRouter.post("/signup", async (req, res) => {
 /**
  * POST /auth/login
  * Body: { identifier, pin }
- * identifier can be email OR phone
+ * identifier can be:
+ *  - email
+ *  - raw phone like "2041234567" (we normalize to +1...)
+ *
+ * We also support a fallback:
+ *  - if phone search fails, we also try the "alias email" we may have used earlier.
  */
 authRouter.post("/login", async (req, res) => {
   try {
@@ -145,7 +154,9 @@ authRouter.post("/login", async (req, res) => {
     } else {
       // Treat as phone
       const normalizedPhone = normalizePhone(raw);
-      const result = await pool.query<UserRow>(
+
+      // 1) Try by phone column
+      let result = await pool.query<UserRow>(
         `
         SELECT id, name, email, phone, pin, role
         FROM users
@@ -154,7 +165,25 @@ authRouter.post("/login", async (req, res) => {
       `,
         [normalizedPhone]
       );
-      if (result.rows.length > 0) userRow = result.rows[0];
+
+      if (result.rows.length > 0) {
+        userRow = result.rows[0];
+      } else {
+        // 2) Fallback: try alias email (for old rows created using phone->email)
+        const aliasEmail = ensureEmail(undefined, normalizedPhone);
+        result = await pool.query<UserRow>(
+          `
+          SELECT id, name, email, phone, pin, role
+          FROM users
+          WHERE email = $1
+          LIMIT 1
+        `,
+          [aliasEmail]
+        );
+        if (result.rows.length > 0) {
+          userRow = result.rows[0];
+        }
+      }
     }
 
     if (!userRow) {
@@ -227,8 +256,10 @@ authRouter.get("/me", async (req, res) => {
 /**
  * PUT /auth/profile
  * Updates name/email/phone for logged-in user.
- * Body: { name?, email?, phone? }
+ * Body: { name?, email?, phone }
  * Header: x-user-id
+ *
+ * Phone is REQUIRED (since you want SMS).
  */
 authRouter.put("/profile", async (req, res) => {
   try {
@@ -245,14 +276,12 @@ authRouter.put("/profile", async (req, res) => {
       phone?: string;
     };
 
-    if (!email && !phone) {
-      return res
-        .status(400)
-        .json({ error: "Please keep at least an email or a phone number." });
+    if (!phone || phone.trim() === "") {
+      return res.status(400).json({ error: "Phone number is required." });
     }
 
-    const normalizedPhone = phone ? normalizePhone(phone) : null;
-    const finalEmail = ensureEmail(email, normalizedPhone ?? undefined);
+    const normalizedPhone = normalizePhone(phone);
+    const finalEmail = ensureEmail(email, normalizedPhone);
 
     const result = await pool.query<UserRow>(
       `
