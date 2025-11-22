@@ -13,17 +13,37 @@ type UserRow = {
 };
 
 /**
- * Normalize phone:
- * - remove spaces/dashes
- * - if no + at start, prefix +1 (US/Canada)
+ * Normalize phone for US/Canada:
+ *
+ * Accepted inputs:
+ *  - "+12041234567"  -> stays "+12041234567"
+ *  - "2041234567"    -> "+12041234567"
+ *  - "1 204 123 4567"-> "+12041234567"
+ *  - "12041234567"   -> "+12041234567"
+ *
+ * Logic:
+ * 1. Remove spaces, dashes, (), dots.
+ * 2. If already starts with "+", trust user and return it.
+ * 3. If starts with "1" and length is 11 -> treat as +1 + rest.
+ * 4. If length is 10 -> treat as +1 + digits.
+ * 5. Else, just prefix "+" so it’s still usable.
  */
 function normalizePhone(raw: string): string {
-  let value = raw.trim();
-  value = value.replace(/[\s\-]/g, "");
-  if (!value.startsWith("+")) {
-    value = "+1" + value;
+  let digits = raw.trim().replace(/[\s\-().]/g, "");
+
+  if (digits.startsWith("+")) {
+    return digits;
   }
-  return value;
+
+  if (digits.startsWith("1") && digits.length === 11) {
+    return `+${digits}`;
+  }
+
+  if (digits.length === 10) {
+    return `+1${digits}`;
+  }
+
+  return `+${digits}`;
 }
 
 /**
@@ -46,9 +66,9 @@ function ensureEmail(email: string | undefined, phone: string | undefined): stri
  * POST /auth/signup
  * Body: { name?, email?, phone?, pin }
  *
- * - We *prefer* phone (for SMS), but backend only requires:
- *   -> at least email OR phone.
- *   Your frontend can still force phone to be filled in.
+ * - At least ONE of email or phone is required.
+ * - Phone is what we actually care about (for SMS), but we don’t force it here
+ *   in case your UI changes.
  */
 authRouter.post("/signup", async (req, res) => {
   try {
@@ -69,7 +89,8 @@ authRouter.post("/signup", async (req, res) => {
       return res.status(400).json({ error: "PIN must be a 4-digit string." });
     }
 
-    const normalizedPhone = phone && phone.trim() !== "" ? normalizePhone(phone) : null;
+    const normalizedPhone =
+      phone && phone.trim() !== "" ? normalizePhone(phone) : null;
     const finalEmail = ensureEmail(email, normalizedPhone ?? undefined);
 
     // Check if user already exists by phone OR email
@@ -86,7 +107,8 @@ authRouter.post("/signup", async (req, res) => {
 
     if (existing.rows.length > 0) {
       return res.status(400).json({
-        error: "An account with this email or phone already exists. Please log in instead.",
+        error:
+          "An account with this email or phone already exists. Please log in instead.",
       });
     }
 
@@ -113,17 +135,11 @@ authRouter.post("/signup", async (req, res) => {
   } catch (err: any) {
     console.error("Error in /auth/signup:", err);
 
-    // Handle common "duplicate" case more nicely if DB has a unique constraint
-    if (err && err.code === "23505") {
-      return res.status(400).json({
-        error: "An account with this email or phone already exists.",
-        details: err.detail || String(err),
-      });
-    }
-
+    // For now we pack error details into the main error string
+    // so you can see EXACTLY what Postgres is complaining about.
+    const msg = err?.message || String(err);
     return res.status(500).json({
-      error: "Internal server error during signup.",
-      details: err?.message || String(err),
+      error: `Internal server error during signup: ${msg}`,
     });
   }
 });
@@ -133,10 +149,10 @@ authRouter.post("/signup", async (req, res) => {
  * Body: { identifier, pin }
  * identifier can be:
  *  - email (contains "@")
- *  - phone like "2041234567" (we normalize to +1...)
+ *  - phone like "2041234567" or "+12041234567"
  *
  * We also support fallback:
- *  - if phone search fails, we try the synthetic email we may have used earlier.
+ *  - if phone search fails, we try the synthetic email created from phone.
  */
 authRouter.post("/login", async (req, res) => {
   try {
@@ -223,9 +239,9 @@ authRouter.post("/login", async (req, res) => {
     });
   } catch (err: any) {
     console.error("Error in /auth/login:", err);
+    const msg = err?.message || String(err);
     return res.status(500).json({
-      error: "Internal server error during login.",
-      details: err?.message || String(err),
+      error: `Internal server error during login: ${msg}`,
     });
   }
 });
@@ -270,9 +286,9 @@ authRouter.get("/me", async (req, res) => {
     });
   } catch (err: any) {
     console.error("Error in /auth/me:", err);
+    const msg = err?.message || String(err);
     return res.status(500).json({
-      error: "Internal server error in /auth/me.",
-      details: err?.message || String(err),
+      error: `Internal server error in /auth/me: ${msg}`,
     });
   }
 });
@@ -282,9 +298,6 @@ authRouter.get("/me", async (req, res) => {
  * Updates name/email/phone for logged-in user.
  * Body: { name?, email?, phone? }
  * Header: x-user-id
- *
- * We require: at least one of email or phone is present after update.
- * (Frontend can enforce phone strongly if you want.)
  */
 authRouter.put("/profile", async (req, res) => {
   try {
@@ -307,7 +320,8 @@ authRouter.put("/profile", async (req, res) => {
         .json({ error: "Please keep at least an email or a phone number." });
     }
 
-    const normalizedPhone = phone && phone.trim() !== "" ? normalizePhone(phone) : null;
+    const normalizedPhone =
+      phone && phone.trim() !== "" ? normalizePhone(phone) : null;
     const finalEmail = ensureEmail(email, normalizedPhone ?? undefined);
 
     const result = await pool.query<UserRow>(
@@ -339,17 +353,9 @@ authRouter.put("/profile", async (req, res) => {
     });
   } catch (err: any) {
     console.error("Error in /auth/profile:", err);
-
-    if (err && err.code === "23505") {
-      return res.status(400).json({
-        error: "That email or phone is already used by another account.",
-        details: err.detail || String(err),
-      });
-    }
-
+    const msg = err?.message || String(err);
     return res.status(500).json({
-      error: "Internal server error while updating profile.",
-      details: err?.message || String(err),
+      error: `Internal server error while updating profile: ${msg}`,
     });
   }
 });
