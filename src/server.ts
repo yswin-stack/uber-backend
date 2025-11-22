@@ -10,6 +10,8 @@ import authRouter from "./routes/auth";
 import devRouter from "./routes/dev";
 import { scheduleRouter } from "./routes/schedule";
 import { creditsRouter } from "./routes/credits";
+import adminRouter from "./routes/admin";
+
 
 dotenv.config();
 
@@ -36,6 +38,7 @@ app.use("/rides", ridesRouter);
 app.use("/schedule", scheduleRouter);
 app.use("/credits", creditsRouter);
 app.use("/dev", devRouter);
+app.use("/admin", adminRouter); // ⬅️ add this line
 
 // SOCKET.IO for live driver tracking
 io.on("connection", (socket) => {
