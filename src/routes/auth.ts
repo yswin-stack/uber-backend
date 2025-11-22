@@ -32,19 +32,23 @@ function normalizePhone(raw: string): string {
  */
 function ensureEmail(email: string | undefined, phone: string | undefined): string {
   if (email && email.trim() !== "") return email.trim().toLowerCase();
-  if (!phone) {
-    // Fallback if called without phone, should be rare
-    return `user${Date.now()}@local`;
+
+  if (phone && phone.trim() !== "") {
+    const p = normalizePhone(phone);
+    return `${p.replace("+", "")}@local`;
   }
-  const p = normalizePhone(phone);
-  return `${p.replace("+", "")}@local`;
+
+  // Last-resort fallback (should basically never be hit if frontend sends phone)
+  return `user${Date.now()}@local`;
 }
 
 /**
  * POST /auth/signup
- * Body: { name?, email?, phone, pin }
- * - PHONE is required (for SMS + identity)
- * - Email is optional
+ * Body: { name?, email?, phone?, pin }
+ *
+ * - We *prefer* phone (for SMS), but backend only requires:
+ *   -> at least email OR phone.
+ *   Your frontend can still force phone to be filled in.
  */
 authRouter.post("/signup", async (req, res) => {
   try {
@@ -55,32 +59,34 @@ authRouter.post("/signup", async (req, res) => {
       pin?: string;
     };
 
-    if (!phone || typeof phone !== "string" || phone.trim() === "") {
-      return res.status(400).json({ error: "Phone number is required." });
+    if (!email && !phone) {
+      return res
+        .status(400)
+        .json({ error: "Please provide at least a phone number or an email." });
     }
 
     if (!pin || typeof pin !== "string" || pin.length !== 4) {
       return res.status(400).json({ error: "PIN must be a 4-digit string." });
     }
 
-    const normalizedPhone = normalizePhone(phone);
-    const finalEmail = ensureEmail(email, normalizedPhone);
+    const normalizedPhone = phone && phone.trim() !== "" ? normalizePhone(phone) : null;
+    const finalEmail = ensureEmail(email, normalizedPhone ?? undefined);
 
     // Check if user already exists by phone OR email
     const existing = await pool.query<UserRow>(
       `
       SELECT id, name, email, phone, pin, role
       FROM users
-      WHERE phone = $1 OR email = $2
+      WHERE email = $1
+         OR ($2 IS NOT NULL AND phone = $2)
       LIMIT 1
     `,
-      [normalizedPhone, finalEmail]
+      [finalEmail, normalizedPhone]
     );
 
     if (existing.rows.length > 0) {
       return res.status(400).json({
-        error:
-          "An account with this phone or email already exists. Please log in instead.",
+        error: "An account with this email or phone already exists. Please log in instead.",
       });
     }
 
@@ -104,9 +110,21 @@ authRouter.post("/signup", async (req, res) => {
         role: user.role,
       },
     });
-  } catch (err) {
+  } catch (err: any) {
     console.error("Error in /auth/signup:", err);
-    return res.status(500).json({ error: "Internal server error" });
+
+    // Handle common "duplicate" case more nicely if DB has a unique constraint
+    if (err && err.code === "23505") {
+      return res.status(400).json({
+        error: "An account with this email or phone already exists.",
+        details: err.detail || String(err),
+      });
+    }
+
+    return res.status(500).json({
+      error: "Internal server error during signup.",
+      details: err?.message || String(err),
+    });
   }
 });
 
@@ -114,11 +132,11 @@ authRouter.post("/signup", async (req, res) => {
  * POST /auth/login
  * Body: { identifier, pin }
  * identifier can be:
- *  - email
- *  - raw phone like "2041234567" (we normalize to +1...)
+ *  - email (contains "@")
+ *  - phone like "2041234567" (we normalize to +1...)
  *
- * We also support a fallback:
- *  - if phone search fails, we also try the "alias email" we may have used earlier.
+ * We also support fallback:
+ *  - if phone search fails, we try the synthetic email we may have used earlier.
  */
 authRouter.post("/login", async (req, res) => {
   try {
@@ -203,9 +221,12 @@ authRouter.post("/login", async (req, res) => {
         role: userRow.role,
       },
     });
-  } catch (err) {
+  } catch (err: any) {
     console.error("Error in /auth/login:", err);
-    return res.status(500).json({ error: "Internal server error" });
+    return res.status(500).json({
+      error: "Internal server error during login.",
+      details: err?.message || String(err),
+    });
   }
 });
 
@@ -247,19 +268,23 @@ authRouter.get("/me", async (req, res) => {
         role: user.role,
       },
     });
-  } catch (err) {
+  } catch (err: any) {
     console.error("Error in /auth/me:", err);
-    return res.status(500).json({ error: "Internal server error" });
+    return res.status(500).json({
+      error: "Internal server error in /auth/me.",
+      details: err?.message || String(err),
+    });
   }
 });
 
 /**
  * PUT /auth/profile
  * Updates name/email/phone for logged-in user.
- * Body: { name?, email?, phone }
+ * Body: { name?, email?, phone? }
  * Header: x-user-id
  *
- * Phone is REQUIRED (since you want SMS).
+ * We require: at least one of email or phone is present after update.
+ * (Frontend can enforce phone strongly if you want.)
  */
 authRouter.put("/profile", async (req, res) => {
   try {
@@ -276,12 +301,14 @@ authRouter.put("/profile", async (req, res) => {
       phone?: string;
     };
 
-    if (!phone || phone.trim() === "") {
-      return res.status(400).json({ error: "Phone number is required." });
+    if (!email && !phone) {
+      return res
+        .status(400)
+        .json({ error: "Please keep at least an email or a phone number." });
     }
 
-    const normalizedPhone = normalizePhone(phone);
-    const finalEmail = ensureEmail(email, normalizedPhone);
+    const normalizedPhone = phone && phone.trim() !== "" ? normalizePhone(phone) : null;
+    const finalEmail = ensureEmail(email, normalizedPhone ?? undefined);
 
     const result = await pool.query<UserRow>(
       `
@@ -310,9 +337,20 @@ authRouter.put("/profile", async (req, res) => {
         role: user.role,
       },
     });
-  } catch (err) {
+  } catch (err: any) {
     console.error("Error in /auth/profile:", err);
-    return res.status(500).json({ error: "Internal server error" });
+
+    if (err && err.code === "23505") {
+      return res.status(400).json({
+        error: "That email or phone is already used by another account.",
+        details: err.detail || String(err),
+      });
+    }
+
+    return res.status(500).json({
+      error: "Internal server error while updating profile.",
+      details: err?.message || String(err),
+    });
   }
 });
 
