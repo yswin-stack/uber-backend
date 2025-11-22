@@ -1,113 +1,226 @@
-import { Router, Request, Response } from "express";
+import { Router } from "express";
 import { pool } from "../db/pool";
 
 const authRouter = Router();
 
+type UserRow = {
+  id: number;
+  name: string | null;
+  email: string;
+  phone: string | null;
+  pin: string;
+  role: string | null;
+};
+
 /**
- * POST /auth/register
- * Register a new user with phone, pin, and email.
+ * Normalize phone:
+ * - remove spaces/dashes
+ * - if no + at start, prefix +1 (US/Canada)
  */
-authRouter.post("/register", async (req: Request, res: Response) => {
+function normalizePhone(raw: string): string {
+  let value = raw.trim();
+  value = value.replace(/[\s\-]/g, "");
+  if (!value.startsWith("+")) {
+    value = "+1" + value;
+  }
+  return value;
+}
+
+/**
+ * Helper: build a safe "email" even if user only supplies phone.
+ * (because your DB requires email NOT NULL)
+ */
+function ensureEmail(email: string | undefined, phone: string | undefined): string {
+  if (email && email.trim() !== "") return email.trim().toLowerCase();
+
+  const phoneId = phone ? normalizePhone(phone) : `user${Date.now()}`;
+  return `${phoneId.replace("+", "")}@local`;
+}
+
+/**
+ * POST /auth/signup
+ * Body: { name?, email?, phone?, pin }
+ */
+authRouter.post("/signup", async (req, res) => {
   try {
-    const { phone, pin, email } = req.body as {
+    const { name, email, phone, pin } = req.body as {
+      name?: string;
+      email?: string;
       phone?: string;
       pin?: string;
-      email?: string;
     };
 
-    if (!phone || !pin) {
-      return res.status(400).json({ error: "Phone and 4-digit PIN are required." });
+    if (!pin || typeof pin !== "string" || pin.length !== 4) {
+      return res.status(400).json({ error: "PIN must be a 4-digit string." });
     }
 
-    if (pin.length !== 4) {
-      return res.status(400).json({ error: "PIN must be 4 digits." });
+    if (!email && !phone) {
+      return res
+        .status(400)
+        .json({ error: "Please provide an email or a phone number." });
     }
 
-    // Check if phone already exists
-    const existing = await pool.query(
+    const normalizedPhone = phone ? normalizePhone(phone) : null;
+    const finalEmail = ensureEmail(email, normalizedPhone ?? undefined);
+
+    // Check if user already exists by email OR phone
+    const existing = await pool.query<UserRow>(
       `
-      SELECT id
+      SELECT id, name, email, phone, pin, role
       FROM users
-      WHERE phone = $1
-      LIMIT 1;
-      `,
-      [phone]
+      WHERE email = $1 OR (phone IS NOT NULL AND phone = $2)
+      LIMIT 1
+    `,
+      [finalEmail, normalizedPhone]
     );
 
-    if ((existing.rowCount ?? 0) > 0) {
-      return res.status(409).json({ error: "An account with this phone already exists." });
+    if (existing.rows.length > 0) {
+      return res.status(400).json({
+        error: "An account with this email or phone already exists. Please log in instead.",
+      });
     }
 
-    const safeEmail =
-      email && email.trim().length > 0
-        ? email.trim()
-        : `${phone.replace(/[^0-9+]/g, "")}@temporary.local`;
-    const role = "subscriber";
-
-    const result = await pool.query(
+    const insert = await pool.query<UserRow>(
       `
-      INSERT INTO users (email, role, phone, pin)
-      VALUES ($1, $2, $3, $4)
-      RETURNING id, email, phone, role;
-      `,
-      [safeEmail, role, phone, pin]
+      INSERT INTO users (email, phone, name, pin, role)
+      VALUES ($1, $2, $3, $4, 'subscriber')
+      RETURNING id, name, email, phone, role
+    `,
+      [finalEmail, normalizedPhone, name ?? null, pin]
     );
 
-    const user = result.rows[0];
+    const user = insert.rows[0];
 
     return res.json({
-      ok: true,
-      userId: user.id,
-      phone: user.phone,
-      email: user.email,
-      role: user.role,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+        role: user.role,
+      },
     });
   } catch (err) {
-    console.error("Error in POST /auth/register", err);
+    console.error("Error in /auth/signup:", err);
     return res.status(500).json({ error: "Internal server error" });
   }
 });
 
 /**
  * POST /auth/login
- * Simple phone + 4-digit PIN login.
+ * Body: { identifier, pin }
+ * identifier can be email OR phone
  */
-authRouter.post("/login", async (req: Request, res: Response) => {
+authRouter.post("/login", async (req, res) => {
   try {
-    const { phone, pin } = req.body as { phone?: string; pin?: string };
+    const { identifier, pin } = req.body as {
+      identifier?: string;
+      pin?: string;
+    };
 
-    if (!phone || !pin) {
-      return res.status(400).json({ error: "Phone and PIN are required." });
+    if (!identifier || !pin) {
+      return res.status(400).json({ error: "identifier and pin are required." });
     }
 
-    const result = await pool.query(
-      `
-      SELECT id, email, phone, pin
-      FROM users
-      WHERE phone = $1
-      LIMIT 1;
+    if (typeof pin !== "string" || pin.length !== 4) {
+      return res.status(400).json({ error: "PIN must be a 4-digit string." });
+    }
+
+    const raw = identifier.trim();
+    let userRow: UserRow | null = null;
+
+    if (raw.includes("@")) {
+      // Treat as email
+      const email = raw.toLowerCase();
+      const result = await pool.query<UserRow>(
+        `
+        SELECT id, name, email, phone, pin, role
+        FROM users
+        WHERE email = $1
+        LIMIT 1
       `,
-      [phone]
+        [email]
+      );
+      if (result.rows.length > 0) userRow = result.rows[0];
+    } else {
+      // Treat as phone
+      const normalizedPhone = normalizePhone(raw);
+      const result = await pool.query<UserRow>(
+        `
+        SELECT id, name, email, phone, pin, role
+        FROM users
+        WHERE phone = $1
+        LIMIT 1
+      `,
+        [normalizedPhone]
+      );
+      if (result.rows.length > 0) userRow = result.rows[0];
+    }
+
+    if (!userRow) {
+      return res.status(401).json({ error: "User not found." });
+    }
+
+    if (userRow.pin !== pin) {
+      return res.status(401).json({ error: "Incorrect PIN." });
+    }
+
+    return res.json({
+      user: {
+        id: userRow.id,
+        name: userRow.name,
+        email: userRow.email,
+        phone: userRow.phone,
+        role: userRow.role,
+      },
+    });
+  } catch (err) {
+    console.error("Error in /auth/login:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+/**
+ * GET /auth/me
+ * Reads x-user-id header and returns basic profile.
+ * (Used by frontend dashboard later if you want.)
+ */
+authRouter.get("/me", async (req, res) => {
+  try {
+    const userIdHeader = req.header("x-user-id");
+    const userIdNum = userIdHeader ? Number(userIdHeader) : NaN;
+
+    if (!userIdHeader || Number.isNaN(userIdNum)) {
+      return res.status(401).json({ error: "Missing or invalid x-user-id header." });
+    }
+
+    const result = await pool.query<UserRow>(
+      `
+      SELECT id, name, email, phone, role
+      FROM users
+      WHERE id = $1
+      LIMIT 1
+    `,
+      [userIdNum]
     );
 
-    if ((result.rowCount ?? 0) === 0) {
-      return res.status(401).json({ error: "Invalid phone or PIN." });
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "User not found." });
     }
 
     const user = result.rows[0];
 
-    if (user.pin !== pin) {
-      return res.status(401).json({ error: "Invalid phone or PIN." });
-    }
-
     return res.json({
-      ok: true,
-      userId: user.id,
-      phone: user.phone,
-      email: user.email,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+        role: user.role,
+      },
     });
   } catch (err) {
-    console.error("Error in POST /auth/login", err);
+    console.error("Error in /auth/me:", err);
     return res.status(500).json({ error: "Internal server error" });
   }
 });
