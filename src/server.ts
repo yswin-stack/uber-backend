@@ -11,6 +11,8 @@ import devRouter from "./routes/dev";
 import { scheduleRouter } from "./routes/schedule";
 import { creditsRouter } from "./routes/credits";
 import adminRouter from "./routes/admin";
+import userRouter from "./routes/user";
+
 
 
 dotenv.config();
