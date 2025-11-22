@@ -1,121 +1,73 @@
-import http from "http";
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import http from "http";
 import { Server as SocketIOServer } from "socket.io";
 
 import { initDb } from "./db/init";
-import { ridesRouter } from "./routes/rides";     // NAMED EXPORT
-import authRouter from "./routes/auth";           // DEFAULT EXPORT
-import devRouter from "./routes/dev";             // DEFAULT EXPORT
+import { ridesRouter } from "./routes/rides";
+import authRouter from "./routes/auth";
+import devRouter from "./routes/dev";
+import { scheduleRouter } from "./routes/schedule";
+import { creditsRouter } from "./routes/credits";
 
 dotenv.config();
 
 const app = express();
-
-/**
- * Basic middleware
- */
-app.use(
-  cors({
+const server = http.createServer(app);
+const io = new SocketIOServer(server, {
+  cors: {
     origin: "*",
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "x-user-id"],
-  })
-);
+  },
+});
+
+// Basic middleware
+app.use(cors({ origin: "*" }));
 app.use(express.json());
 
-/**
- * Health check
- */
+// Health check
 app.get("/", (_req, res) => {
   res.json({ ok: true, message: "Backend is running" });
 });
 
-/**
- * Routes
- */
+// Routers
 app.use("/auth", authRouter);
 app.use("/rides", ridesRouter);
+app.use("/schedule", scheduleRouter);
+app.use("/credits", creditsRouter);
 app.use("/dev", devRouter);
 
-/**
- * HTTP + Socket.IO server
- */
-const PORT = Number(process.env.PORT) || 10000;
-const httpServer = http.createServer(app);
-
-const io = new SocketIOServer(httpServer, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST"],
-  },
-});
-
-/**
- * Socket.IO: rooms per ride + location broadcast
- */
+// SOCKET.IO for live driver tracking
 io.on("connection", (socket) => {
-  console.log("Socket connected:", socket.id);
+  console.log("Client connected", socket.id);
 
-  socket.on("join_ride", (data: { rideId: any }) => {
-    try {
-      const rideIdNum = Number(data.rideId);
-      if (!rideIdNum || Number.isNaN(rideIdNum)) {
-        console.warn("join_ride invalid rideId:", data);
-        return;
-      }
-
-      const room = `ride_${rideIdNum}`;
-      socket.join(room);
-      console.log(`Socket ${socket.id} joined room ${room}`);
-    } catch (err) {
-      console.error("join_ride error:", err);
-    }
+  socket.on("join_ride", (rideId: number) => {
+    socket.join(`ride_${rideId}`);
   });
 
-  socket.on("location_update", (payload: { rideId: any; lat: number; lng: number }) => {
-    try {
-      const rideIdNum = Number(payload.rideId);
-      if (!rideIdNum || Number.isNaN(rideIdNum)) {
-        console.warn("location_update invalid rideId:", payload);
-        return;
-      }
-
-      const room = `ride_${rideIdNum}`;
-      const out = {
-        rideId: rideIdNum,
-        lat: payload.lat,
-        lng: payload.lng,
-      };
-
-      io.to(room).emit("location_update", out);
-      console.log("Broadcast →", room, out);
-    } catch (err) {
-      console.error("location_update error:", err);
+  socket.on(
+    "driver_location_update",
+    (payload: { rideId: number; lat: number; lng: number }) => {
+      const { rideId, lat, lng } = payload;
+      io.to(`ride_${rideId}`).emit("location_update", { lat, lng });
     }
-  });
+  );
 
   socket.on("disconnect", () => {
-    console.log("Socket disconnected:", socket.id);
+    console.log("Client disconnected", socket.id);
   });
 });
 
-/**
- * Start server after DB init
- */
+// Start server
 async function start() {
-  try {
-    await initDb();
-    console.log("✅ Database initialized");
-
-    httpServer.listen(PORT, () => {
-      console.log(`🚀 Server running on http://localhost:${PORT}`);
-    });
-  } catch (err) {
-    console.error("❌ DB init failed", err);
-    process.exit(1);
-  }
+  await initDb();
+  const port = process.env.PORT || 10000;
+  server.listen(port, () => {
+    console.log(`🚀 Server listening on http://localhost:${port}`);
+  });
 }
 
-start();
+start().catch((err) => {
+  console.error("Fatal server start error:", err);
+  process.exit(1);
+});
