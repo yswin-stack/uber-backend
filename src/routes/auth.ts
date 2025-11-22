@@ -9,23 +9,18 @@ type UserRow = {
   phone: string | null;
   pin: string;
   role: string | null;
+  name: string | null;
+  work_address: string | null;
+  school_address: string | null;
 };
 
 /**
  * Normalize phone for US/Canada:
  *
- * Accepted inputs:
  *  - "+12041234567"  -> stays "+12041234567"
  *  - "2041234567"    -> "+12041234567"
  *  - "1 204 123 4567"-> "+12041234567"
  *  - "12041234567"   -> "+12041234567"
- *
- * Logic:
- * 1. Remove spaces, dashes, (), dots.
- * 2. If already starts with "+", trust user and return it.
- * 3. If starts with "1" and length is 11 -> treat as +1 + rest.
- * 4. If length is 10 -> treat as +1 + digits.
- * 5. Else, just prefix "+" so it’s still usable.
  */
 function normalizePhone(raw: string): string {
   let digits = raw.trim().replace(/[\s\-().]/g, "");
@@ -57,16 +52,12 @@ function ensureEmail(email: string | undefined, phone: string | undefined): stri
     return `${p.replace("+", "")}@local`;
   }
 
-  // Last-resort fallback (should basically never be hit if frontend sends phone)
   return `user${Date.now()}@local`;
 }
 
 /**
  * POST /auth/signup
  * Body: { name?, email?, phone, pin }
- *
- * - PHONE is required (for SMS and identity)
- * - Email is optional
  */
 authRouter.post("/signup", async (req, res) => {
   try {
@@ -89,11 +80,12 @@ authRouter.post("/signup", async (req, res) => {
 
     const normalizedPhone = normalizePhone(phone);
     const finalEmail = ensureEmail(email, normalizedPhone);
+    const finalName = name && name.trim() !== "" ? name.trim() : null;
 
     // Check if user already exists by phone OR email
     const existing = await pool.query<UserRow>(
       `
-      SELECT id, email, phone, pin, role
+      SELECT id, email, phone, pin, role, name, work_address, school_address
       FROM users
       WHERE email = $1
          OR phone = $2
@@ -111,23 +103,24 @@ authRouter.post("/signup", async (req, res) => {
 
     const insert = await pool.query<UserRow>(
       `
-      INSERT INTO users (email, phone, pin, role)
-      VALUES ($1, $2, $3, 'subscriber')
-      RETURNING id, email, phone, pin, role
+      INSERT INTO users (email, phone, pin, role, name)
+      VALUES ($1, $2, $3, 'subscriber', $4)
+      RETURNING id, email, phone, pin, role, name, work_address, school_address
     `,
-      [finalEmail, normalizedPhone, pin]
+      [finalEmail, normalizedPhone, pin, finalName]
     );
 
     const user = insert.rows[0];
 
-    // We don't have a 'name' column in DB, so we only return null here.
     return res.json({
       user: {
         id: user.id,
-        name: name || null, // for frontend greeting (not persisted in DB)
+        name: user.name,
         email: user.email,
         phone: user.phone,
         role: user.role,
+        workAddress: user.work_address,
+        schoolAddress: user.school_address,
       },
     });
   } catch (err: any) {
@@ -142,12 +135,7 @@ authRouter.post("/signup", async (req, res) => {
 /**
  * POST /auth/login
  * Body: { identifier, pin }
- * identifier can be:
- *  - email (contains "@")
- *  - phone like "2041234567" or "+12041234567"
- *
- * We also support fallback:
- *  - if phone search fails, we try the synthetic email created from phone.
+ * identifier: email OR phone
  */
 authRouter.post("/login", async (req, res) => {
   try {
@@ -168,11 +156,10 @@ authRouter.post("/login", async (req, res) => {
     let userRow: UserRow | null = null;
 
     if (raw.includes("@")) {
-      // Treat as email
       const email = raw.toLowerCase();
       const result = await pool.query<UserRow>(
         `
-        SELECT id, email, phone, pin, role
+        SELECT id, email, phone, pin, role, name, work_address, school_address
         FROM users
         WHERE email = $1
         LIMIT 1
@@ -181,13 +168,12 @@ authRouter.post("/login", async (req, res) => {
       );
       if (result.rows.length > 0) userRow = result.rows[0];
     } else {
-      // Treat as phone
       const normalizedPhone = normalizePhone(raw);
 
-      // 1) Try by phone column
+      // 1) Try by phone
       let result = await pool.query<UserRow>(
         `
-        SELECT id, email, phone, pin, role
+        SELECT id, email, phone, pin, role, name, work_address, school_address
         FROM users
         WHERE phone = $1
         LIMIT 1
@@ -198,20 +184,18 @@ authRouter.post("/login", async (req, res) => {
       if (result.rows.length > 0) {
         userRow = result.rows[0];
       } else {
-        // 2) Fallback: try alias email (for old rows created using phone->email)
+        // 2) Fallback alias email from phone (for older rows)
         const aliasEmail = ensureEmail(undefined, normalizedPhone);
         result = await pool.query<UserRow>(
           `
-          SELECT id, email, phone, pin, role
+          SELECT id, email, phone, pin, role, name, work_address, school_address
           FROM users
           WHERE email = $1
           LIMIT 1
         `,
           [aliasEmail]
         );
-        if (result.rows.length > 0) {
-          userRow = result.rows[0];
-        }
+        if (result.rows.length > 0) userRow = result.rows[0];
       }
     }
 
@@ -226,10 +210,12 @@ authRouter.post("/login", async (req, res) => {
     return res.json({
       user: {
         id: userRow.id,
-        name: null, // no name in DB yet
+        name: userRow.name,
         email: userRow.email,
         phone: userRow.phone,
         role: userRow.role,
+        workAddress: userRow.work_address,
+        schoolAddress: userRow.school_address,
       },
     });
   } catch (err: any) {
@@ -256,7 +242,7 @@ authRouter.get("/me", async (req, res) => {
 
     const result = await pool.query<UserRow>(
       `
-      SELECT id, email, phone, pin, role
+      SELECT id, email, phone, pin, role, name, work_address, school_address
       FROM users
       WHERE id = $1
       LIMIT 1
@@ -273,10 +259,12 @@ authRouter.get("/me", async (req, res) => {
     return res.json({
       user: {
         id: user.id,
-        name: null,
+        name: user.name,
         email: user.email,
         phone: user.phone,
         role: user.role,
+        workAddress: user.work_address,
+        schoolAddress: user.school_address,
       },
     });
   } catch (err: any) {
@@ -290,11 +278,7 @@ authRouter.get("/me", async (req, res) => {
 
 /**
  * PUT /auth/profile
- * Updates email/phone for logged-in user.
- * Body: { name?, email?, phone? }
- * Header: x-user-id
- *
- * (We ignore 'name' here because DB has no name column.)
+ * Body: { name?, email?, phone?, workAddress?, schoolAddress? }
  */
 authRouter.put("/profile", async (req, res) => {
   try {
@@ -305,10 +289,12 @@ authRouter.put("/profile", async (req, res) => {
       return res.status(401).json({ error: "Missing or invalid x-user-id header." });
     }
 
-    const { name, email, phone } = req.body as {
+    const { name, email, phone, workAddress, schoolAddress } = req.body as {
       name?: string;
       email?: string;
       phone?: string;
+      workAddress?: string;
+      schoolAddress?: string;
     };
 
     if (!email && !phone) {
@@ -321,15 +307,23 @@ authRouter.put("/profile", async (req, res) => {
       phone && phone.trim() !== "" ? normalizePhone(phone) : null;
     const finalEmail = ensureEmail(email, normalizedPhone ?? undefined);
 
+    const finalName = name && name.trim() !== "" ? name.trim() : null;
+    const finalWork = workAddress && workAddress.trim() !== "" ? workAddress.trim() : null;
+    const finalSchool =
+      schoolAddress && schoolAddress.trim() !== "" ? schoolAddress.trim() : null;
+
     const result = await pool.query<UserRow>(
       `
       UPDATE users
       SET email = $1,
-          phone = $2
-      WHERE id = $3
-      RETURNING id, email, phone, pin, role
+          phone = $2,
+          name = $3,
+          work_address = $4,
+          school_address = $5
+      WHERE id = $6
+      RETURNING id, email, phone, pin, role, name, work_address, school_address
     `,
-      [finalEmail, normalizedPhone, userIdNum]
+      [finalEmail, normalizedPhone, finalName, finalWork, finalSchool, userIdNum]
     );
 
     if (result.rows.length === 0) {
@@ -341,10 +335,12 @@ authRouter.put("/profile", async (req, res) => {
     return res.json({
       user: {
         id: user.id,
-        name: name || null, // not stored in DB, but sent back for UI
+        name: user.name,
         email: user.email,
         phone: user.phone,
         role: user.role,
+        workAddress: user.work_address,
+        schoolAddress: user.school_address,
       },
     });
   } catch (err: any) {
