@@ -5,13 +5,138 @@ import { sendSmsOrLog } from "../lib/notifications";
 
 export const ridesRouter = Router();
 
-const MAX_RIDES_PER_SLOT = 4; // adjust capacity per 15-min slot
+const MAX_RIDES_PER_SLOT = 2; // adjust capacity per 15-min slot
 
 function getUserIdFromHeader(req: Request): number | null {
   const header = req.header("x-user-id");
   if (!header) return null;
   const id = parseInt(header, 10);
   return Number.isNaN(id) ? null : id;
+
+// ---- Slot capacity settings ----
+const MAX_RIDES_PER_SLOT = 3;      // how many rides you can realistically do in 15 mins
+const SLOT_MINUTES = 15;
+
+const ACTIVE_STATUSES = [
+  "pending",
+  "confirmed",
+  "driver_en_route",
+  "arrived",
+  "in_progress",
+] as const;
+
+type SlotSuggestion = {
+  start: string;
+  end: string;
+  count: number;
+  max: number;
+  label: string;
+};
+
+function computeSlotBounds(iso: string): { start: Date; end: Date } | null {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return null;
+
+  const rounded = new Date(d);
+  const minutes = rounded.getMinutes();
+  const remainder = minutes % SLOT_MINUTES;
+  rounded.setMinutes(minutes - remainder, 0, 0);
+
+  const start = rounded;
+  const end = new Date(rounded.getTime() + SLOT_MINUTES * 60 * 1000);
+
+  return { start, end };
+}
+
+function formatTimeLabel(d: Date): string {
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  return `${hh}:${mm}`;
+}
+
+/**
+ * Check how many active rides are in the slot that contains pickupTimeIso.
+ * Also compute a few next available slots as suggestions.
+ */
+async function checkSlotCapacity(
+  pickupTimeIso: string
+): Promise<{
+  isFull: boolean;
+  count: number;
+  max: number;
+  suggestions: SlotSuggestion[];
+}> {
+  const bounds = computeSlotBounds(pickupTimeIso);
+  if (!bounds) {
+    return {
+      isFull: false,
+      count: 0,
+      max: MAX_RIDES_PER_SLOT,
+      suggestions: [],
+    };
+  }
+
+  const { start, end } = bounds;
+
+  // Count active rides in that slot
+  const baseResult = await pool.query(
+    `
+    SELECT COUNT(*)::int AS count
+    FROM rides
+    WHERE pickup_time >= $1
+      AND pickup_time < $2
+      AND status = ANY($3)
+  `,
+    [start, end, ACTIVE_STATUSES]
+  );
+
+  const baseCount: number = baseResult.rows[0]?.count ?? 0;
+  const isFull = baseCount >= MAX_RIDES_PER_SLOT;
+
+  // Build suggestions (next up to 4 slots, first 3 that are not full)
+  const suggestions: SlotSuggestion[] = [];
+  let cursorStart = new Date(start);
+
+  for (let i = 0; i < 4; i++) {
+    cursorStart = new Date(cursorStart.getTime() + SLOT_MINUTES * 60 * 1000);
+    const cursorEnd = new Date(
+      cursorStart.getTime() + SLOT_MINUTES * 60 * 1000
+    );
+
+    const result = await pool.query(
+      `
+      SELECT COUNT(*)::int AS count
+      FROM rides
+      WHERE pickup_time >= $1
+        AND pickup_time < $2
+        AND status = ANY($3)
+    `,
+      [cursorStart, cursorEnd, ACTIVE_STATUSES]
+    );
+
+    const count = result.rows[0]?.count ?? 0;
+    if (count < MAX_RIDES_PER_SLOT) {
+      suggestions.push({
+        start: cursorStart.toISOString(),
+        end: cursorEnd.toISOString(),
+        count,
+        max: MAX_RIDES_PER_SLOT,
+        label: formatTimeLabel(cursorStart),
+      });
+    }
+
+    if (suggestions.length >= 3) break;
+  }
+
+  return {
+    isFull,
+    count: baseCount,
+    max: MAX_RIDES_PER_SLOT,
+    suggestions,
+  };
+}
+
+  
 }
 
 // Helper: 15-minute slot rounding
