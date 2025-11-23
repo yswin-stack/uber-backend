@@ -2,13 +2,15 @@ import { pool } from "./pool";
 
 export async function initDb() {
   // This function runs at server start and ensures all tables/columns exist.
-  // We use IF NOT EXISTS so it is safe to run repeatedly.
+  // It is safe to run repeatedly because we use IF NOT EXISTS everywhere.
 
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
 
+    //
     // USERS
+    //
     await client.query(`
       CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
@@ -21,13 +23,15 @@ export async function initDb() {
       );
     `);
 
-    // Ensure role column exists
+    // Make sure role column exists even on older DBs
     await client.query(`
       ALTER TABLE users
       ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'subscriber';
     `);
 
-    // RIDES
+    //
+    // RIDES (basic version – we will extend later in other steps)
+    //
     await client.query(`
       CREATE TABLE IF NOT EXISTS rides (
         id SERIAL PRIMARY KEY,
@@ -53,11 +57,9 @@ export async function initDb() {
       CREATE INDEX IF NOT EXISTS idx_rides_pickup_time ON rides(pickup_time);
     `);
 
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_rides_status ON rides(status);
-    `);
-
-    // MONTHLY CREDITS
+    //
+    // MONTHLY RIDE CREDITS (older basic model – 40 normal + 4 grocery)
+    //
     await client.query(`
       CREATE TABLE IF NOT EXISTS ride_credits_monthly (
         id SERIAL PRIMARY KEY,
@@ -71,7 +73,10 @@ export async function initDb() {
       );
     `);
 
-    // WEEKLY SCHEDULE TEMPLATE
+    //
+    // WEEKLY SCHEDULE (future, more advanced template with windows)
+    // NOTE: not used by current frontend yet, but we will hook into this later.
+    //
     await client.query(`
       CREATE TABLE IF NOT EXISTS weekly_schedule (
         id SERIAL PRIMARY KEY,
@@ -87,14 +92,34 @@ export async function initDb() {
       );
     `);
 
-    // NOTIFICATIONS (for logging + possible in-app later)
+    //
+    // USER_SCHEDULES (this is what your current /schedule API + frontend use)
+    // day_of_week + direction + single arrival_time.
+    //
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS user_schedules (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        day_of_week INTEGER NOT NULL, -- 0=Sunday ... 6=Saturday
+        direction TEXT NOT NULL CHECK (direction IN ('to_work', 'to_home')),
+        arrival_time TIME NOT NULL
+      );
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_user_schedules_user_id
+      ON user_schedules(user_id);
+    `);
+
+    //
+    // NOTIFICATIONS (logging + future in-app messaging)
+    //
     await client.query(`
       CREATE TABLE IF NOT EXISTS notifications (
         id SERIAL PRIMARY KEY,
         user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         ride_id INTEGER REFERENCES rides(id) ON DELETE CASCADE,
-        type TEXT NOT NULL, -- sms, in_app
-        channel TEXT NOT NULL, -- 'twilio', 'ui'
+        channel TEXT NOT NULL,                -- 'sms' | 'email' | 'push'
         message TEXT NOT NULL,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
