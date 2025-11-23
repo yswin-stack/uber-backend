@@ -2,6 +2,7 @@ import { Router, Request, Response } from "express";
 import { pool } from "../db/pool";
 import { normalizePhone } from "./auth";
 
+
 const adminRouter = Router();
 
 /**
