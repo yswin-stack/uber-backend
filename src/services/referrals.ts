@@ -114,7 +114,7 @@ export async function recordReferralUsage(
     "SELECT id FROM referrals WHERE referred_user_id = $1",
     [referredUserId]
   );
-  if (existing.rowCount > 0) {
+   if ((existing.rowCount ?? 0) > 0) {
     throw new Error("Referral already recorded for this user.");
   }
 
