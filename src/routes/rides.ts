@@ -1,6 +1,7 @@
 import { Router, Request, Response } from "express";
 import { pool } from "../db/pool";
 import { computeDistanceKm } from "../utils/distance";
+import { sendRideStatusNotification } from "../services/notifications";
 
 const ridesRouter = Router();
 
@@ -9,8 +10,8 @@ const CAMPUS_CENTER = { lat: 49.8075, lng: -97.1325 };
 const CORE_RADIUS_KM = 6; // normal rides
 const GROCERY_RADIUS_KM = 10; // grocery rides
 
-const MAX_RIDES_PER_HOUR = 4;           // capacity rule
-const OVERLAP_BUFFER_MINUTES = 30;      // ±30 min per user
+const MAX_RIDES_PER_HOUR = 4; // capacity rule
+const OVERLAP_BUFFER_MINUTES = 30; // ±30 min per user
 
 function getUserIdFromHeader(req: Request): number | null {
   const header = req.header("x-user-id");
@@ -94,13 +95,7 @@ ridesRouter.get("/:id", async (req: Request, res: Response) => {
 /**
  * POST /rides
  *
- * This is the core "arrive-by" booking endpoint.
- * It:
- *  - Validates service radius (6km / 10km grocery)
- *  - Converts arrive_by → pickup_time + pickup/arrival windows
- *  - Enforces max 4 rides/hour (single driver)
- *  - Enforces ±30 min no-overlap per user
- *  - Deducts the right credit (standard/grocery)
+ * Core "arrive-by" booking endpoint.
  */
 ridesRouter.post("/", async (req: Request, res: Response) => {
   const userId = getUserIdFromHeader(req);
@@ -108,7 +103,6 @@ ridesRouter.post("/", async (req: Request, res: Response) => {
     return res.status(401).json({ error: "Missing or invalid x-user-id header." });
   }
 
-  // Support both old and new frontend shapes
   const {
     pickup_location,
     dropoff_location,
@@ -119,7 +113,7 @@ ridesRouter.post("/", async (req: Request, res: Response) => {
     dropoff_lat,
     dropoff_lng,
     arrive_by,
-    pickup_time, // older UI used this as "pickup at"
+    pickup_time, // legacy
     ride_type,
     is_grocery,
     notes,
@@ -179,9 +173,7 @@ ridesRouter.post("/", async (req: Request, res: Response) => {
   }
 
   //
-  // 2) Parse arrive-by time
-  //    For now, if frontend hasn't switched to arrive_by yet, we treat
-  //    pickup_time as arrive_by (will be updated on the frontend side later).
+  // 2) Parse arrive-by time (fallback: pickup_time from old UI)
   //
   const arriveRaw: string | undefined = arrive_by || pickup_time;
   if (!arriveRaw) {
@@ -212,27 +204,35 @@ ridesRouter.post("/", async (req: Request, res: Response) => {
     Number(dropoff_lng)
   );
 
-  // Simple baseline, later AI will refine this with weather/traffic
+  // Simple baseline (later AI engine can adjust)
   const SPEED_KMH = 25; // ~city driving
-  const baseMinutes = Math.max(6, (legKm / SPEED_KMH) * 60); // at least 6 minutes
+  const baseMinutes = Math.max(6, (legKm / SPEED_KMH) * 60); // minimum 6 min
   const travelMinutes = Math.ceil(baseMinutes);
 
-  const ARRIVE_EARLY_MIN = 5; // promise: aim to arrive 5 min early
-  const PICKUP_WINDOW_HALF_SPAN_MIN = 5; // ±5 min
-  const ARRIVAL_WINDOW_HALF_SPAN_MIN = 5; // ±5 min
+  const ARRIVE_EARLY_MIN = 5;
+  const PICKUP_WINDOW_HALF_SPAN_MIN = 5; // ±5
+  const ARRIVAL_WINDOW_HALF_SPAN_MIN = 5;
 
-  // We want to arrive ~5 min before requested arrival
-  const pickupTime = addMinutes(arriveBy, -(travelMinutes + ARRIVE_EARLY_MIN));
+  const pickupTimeObj = addMinutes(arriveBy, -(travelMinutes + ARRIVE_EARLY_MIN));
 
-  const pickupWindowStart = addMinutes(pickupTime, -PICKUP_WINDOW_HALF_SPAN_MIN);
-  const pickupWindowEnd = addMinutes(pickupTime, PICKUP_WINDOW_HALF_SPAN_MIN);
-  const arrivalWindowStart = addMinutes(arriveBy, -ARRIVAL_WINDOW_HALF_SPAN_MIN);
+  const pickupWindowStart = addMinutes(
+    pickupTimeObj,
+    -PICKUP_WINDOW_HALF_SPAN_MIN
+  );
+  const pickupWindowEnd = addMinutes(
+    pickupTimeObj,
+    PICKUP_WINDOW_HALF_SPAN_MIN
+  );
+  const arrivalWindowStart = addMinutes(
+    arriveBy,
+    -ARRIVAL_WINDOW_HALF_SPAN_MIN
+  );
   const arrivalWindowEnd = addMinutes(arriveBy, ARRIVAL_WINDOW_HALF_SPAN_MIN);
 
   //
-  // 4) Capacity rule: max 4 rides per hour (single driver)
+  // 4) Capacity rule: max 4 rides per hour
   //
-  const hourStart = new Date(pickupTime);
+  const hourStart = new Date(pickupTimeObj);
   hourStart.setMinutes(0, 0, 0);
   const hourEnd = new Date(hourStart);
   hourEnd.setHours(hourEnd.getHours() + 1);
@@ -264,8 +264,8 @@ ridesRouter.post("/", async (req: Request, res: Response) => {
   //
   // 5) Overlap rule: no rides within ±30 minutes for the same user
   //
-  const overlapStart = addMinutes(pickupTime, -OVERLAP_BUFFER_MINUTES);
-  const overlapEnd = addMinutes(pickupTime, OVERLAP_BUFFER_MINUTES);
+  const overlapStart = addMinutes(pickupTimeObj, -OVERLAP_BUFFER_MINUTES);
+  const overlapEnd = addMinutes(pickupTimeObj, OVERLAP_BUFFER_MINUTES);
 
   try {
     const overlapResult = await pool.query(
@@ -299,7 +299,6 @@ ridesRouter.post("/", async (req: Request, res: Response) => {
   const monthStart = getMonthStart(now);
 
   try {
-    // Ensure row exists (upsert)
     await pool.query(
       `
       INSERT INTO ride_credits_monthly (user_id, month_start)
@@ -375,7 +374,7 @@ ridesRouter.post("/", async (req: Request, res: Response) => {
         pickup_lng,
         dropoff_lat,
         dropoff_lng,
-        pickupTime.toISOString(),
+        pickupTimeObj.toISOString(),
         arriveBy.toISOString(),
         pickupWindowStart.toISOString(),
         pickupWindowEnd.toISOString(),
@@ -409,6 +408,20 @@ ridesRouter.post("/", async (req: Request, res: Response) => {
         `,
         [credits.id]
       );
+    }
+
+    //
+    // 9) Fire booking confirmation notification (non-blocking)
+    //
+    try {
+      await sendRideStatusNotification(
+        userId,
+        ride.id,
+        "booking_confirmed",
+        ride.pickup_time
+      );
+    } catch (notifyErr) {
+      console.warn("Failed to send booking confirmation SMS:", notifyErr);
     }
 
     return res.status(201).json({ ride });
@@ -475,6 +488,18 @@ ridesRouter.post("/:id/cancel", async (req: Request, res: Response) => {
       [rideId]
     );
 
+    // Optional: send cancellation SMS
+    try {
+      await sendRideStatusNotification(
+        userId,
+        rideId,
+        "cancelled_by_user",
+        ride.pickup_time
+      );
+    } catch (notifyErr) {
+      console.warn("Failed to send cancellation SMS:", notifyErr);
+    }
+
     return res.json({ ok: true });
   } catch (err) {
     console.error("Error cancelling ride:", err);
@@ -484,4 +509,3 @@ ridesRouter.post("/:id/cancel", async (req: Request, res: Response) => {
 
 export { ridesRouter };
 export default ridesRouter;
-
