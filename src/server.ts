@@ -12,6 +12,8 @@ import { scheduleRouter } from "./routes/schedule";
 import { creditsRouter } from "./routes/credits";
 import adminRouter from "./routes/admin";
 import userRouter from "./routes/user";
+import slotsRouter from "./routes/slots";
+
 
 
 
@@ -42,6 +44,8 @@ app.use("/credits", creditsRouter);
 app.use("/dev", devRouter);
 app.use("/admin", adminRouter); // ⬅️ add this line
 app.use("/user", userRouter);
+app.use("/slots", slotsRouter);
+
 
 // SOCKET.IO for live driver tracking
 io.on("connection", (socket) => {
