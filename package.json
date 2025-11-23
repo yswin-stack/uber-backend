@@ -14,9 +14,9 @@
     "express": "^4.19.2",
     "pg": "^8.11.5",
     "socket.io": "^4.8.1",
-    "twilio": "^5.0.0"
     "jsonwebtoken": "^9.0.2",
-
+    "twilio": "^5.0.0"
+  
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
@@ -25,8 +25,9 @@
     "@types/pg": "^8.10.0",
     "@types/socket.io": "^3.0.2",
     "ts-node-dev": "^2.0.0",
+ "@types/jsonwebtoken": "^9.0.5",
     "typescript": "^5.6.3"
-    "@types/jsonwebtoken": "^9.0.5",
+  
 
   }
 }
