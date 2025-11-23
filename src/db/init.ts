@@ -21,14 +21,13 @@ export async function initDb() {
       );
     `);
 
-    // Ensure newer columns exist on older DBs
     await client.query(`
       ALTER TABLE users
       ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'subscriber';
     `);
 
     //
-    // RIDES – single source of truth for booked rides
+    // RIDES – core record of every ride
     //
     await client.query(`
       CREATE TABLE IF NOT EXISTS rides (
@@ -50,6 +49,13 @@ export async function initDb() {
         ride_type TEXT NOT NULL DEFAULT 'standard', -- 'standard' | 'grocery'
         status TEXT NOT NULL DEFAULT 'pending',
         driver_id INTEGER REFERENCES users(id),
+        arrived_at TIMESTAMPTZ,
+        in_progress_at TIMESTAMPTZ,
+        wait_minutes INTEGER NOT NULL DEFAULT 0,
+        wait_charge_cents INTEGER NOT NULL DEFAULT 0,
+        late_minutes INTEGER NOT NULL DEFAULT 0,
+        compensation_type TEXT NOT NULL DEFAULT 'none',
+        compensation_applied BOOLEAN NOT NULL DEFAULT FALSE,
         completed_at TIMESTAMPTZ,
         cancelled_at TIMESTAMPTZ,
         notes TEXT
@@ -92,6 +98,34 @@ export async function initDb() {
     await client.query(`
       ALTER TABLE rides
       ADD COLUMN IF NOT EXISTS notes TEXT;
+    `);
+    await client.query(`
+      ALTER TABLE rides
+      ADD COLUMN IF NOT EXISTS arrived_at TIMESTAMPTZ;
+    `);
+    await client.query(`
+      ALTER TABLE rides
+      ADD COLUMN IF NOT EXISTS in_progress_at TIMESTAMPTZ;
+    `);
+    await client.query(`
+      ALTER TABLE rides
+      ADD COLUMN IF NOT EXISTS wait_minutes INTEGER NOT NULL DEFAULT 0;
+    `);
+    await client.query(`
+      ALTER TABLE rides
+      ADD COLUMN IF NOT EXISTS wait_charge_cents INTEGER NOT NULL DEFAULT 0;
+    `);
+    await client.query(`
+      ALTER TABLE rides
+      ADD COLUMN IF NOT EXISTS late_minutes INTEGER NOT NULL DEFAULT 0;
+    `);
+    await client.query(`
+      ALTER TABLE rides
+      ADD COLUMN IF NOT EXISTS compensation_type TEXT NOT NULL DEFAULT 'none';
+    `);
+    await client.query(`
+      ALTER TABLE rides
+      ADD COLUMN IF NOT EXISTS compensation_applied BOOLEAN NOT NULL DEFAULT FALSE;
     `);
 
     await client.query(`
@@ -137,7 +171,7 @@ export async function initDb() {
     `);
 
     //
-    // USER SCHEDULES – what /schedule API & frontend use today
+    // USER SCHEDULES – used by /schedule API and frontend
     //
     await client.query(`
       CREATE TABLE IF NOT EXISTS user_schedules (
