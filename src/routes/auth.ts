@@ -1,10 +1,12 @@
 import { Router, Request, Response } from "express";
 import { pool } from "../db/pool";
+import jwt from "jsonwebtoken";
 
 const authRouter = Router();
 
 // This is YOU (admin)
 const ADMIN_PHONE = "+14313389073";
+const JWT_SECRET = process.env.JWT_SECRET || "dev-secret-change-this";
 
 /**
  * Normalize phone:
@@ -28,6 +30,17 @@ function normalizePhone(raw: string): string {
 
   // Otherwise just stick +1 in front
   return "+1" + cleaned;
+}
+
+function signToken(userId: number, role: "subscriber" | "driver" | "admin") {
+  return jwt.sign(
+    {
+      userId,
+      role,
+    },
+    JWT_SECRET,
+    { expiresIn: "30d" }
+  );
 }
 
 // POST /auth/register
@@ -77,8 +90,11 @@ authRouter.post("/register", async (req: Request, res: Response) => {
 
     const user = insert.rows[0];
 
+    const token = signToken(user.id, user.role);
+
     return res.json({
       ok: true,
+      token,
       userId: user.id,
       phone: user.phone,
       name: user.name,
@@ -134,8 +150,11 @@ authRouter.post("/login", async (req: Request, res: Response) => {
       user.role = "admin";
     }
 
+    const token = signToken(user.id, user.role);
+
     return res.json({
       ok: true,
+      token,
       userId: user.id,
       phone: user.phone,
       name: user.name,
@@ -148,6 +167,55 @@ authRouter.post("/login", async (req: Request, res: Response) => {
     return res
       .status(500)
       .json({ error: "Internal server error during login." });
+  }
+});
+
+// GET /auth/me  (uses Authorization: Bearer <token>)
+authRouter.get("/me", async (req: Request, res: Response) => {
+  try {
+    const authHeader = req.header("Authorization") || "";
+    if (!authHeader.startsWith("Bearer ")) {
+      return res.status(401).json({ error: "Missing token." });
+    }
+    const token = authHeader.slice("Bearer ".length).trim();
+    if (!token) {
+      return res.status(401).json({ error: "Missing token." });
+    }
+
+    let payload: any;
+    try {
+      payload = jwt.verify(token, JWT_SECRET) as {
+        userId: number;
+        role: "subscriber" | "driver" | "admin";
+      };
+    } catch (err) {
+      console.error("Invalid token in /auth/me:", err);
+      return res.status(401).json({ error: "Invalid token." });
+    }
+
+    const result = await pool.query(
+      "SELECT id, email, name, role, phone FROM users WHERE id = $1",
+      [payload.userId]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: "User not found." });
+    }
+
+    const user = result.rows[0];
+
+    return res.json({
+      ok: true,
+      userId: user.id,
+      phone: user.phone,
+      name: user.name,
+      role: user.role,
+      isDriver: user.role === "driver",
+      isAdmin: user.role === "admin",
+    });
+  } catch (err) {
+    console.error("Error in /auth/me:", err);
+    return res.status(500).json({ error: "Internal server error." });
   }
 });
 
