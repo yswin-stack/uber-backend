@@ -1,84 +1,87 @@
-import { Router, Request, Response } from "express";
+import express from "express";
 import { pool } from "../db/pool";
+import { generateRidesForDate } from "../services/scheduler";
 
-const devRouter = Router();
+const devRouter = express.Router();
+
+// Simple health check for dev routes
+devRouter.get("/ping", (_req, res) => {
+  res.json({ ok: true, message: "dev routes alive" });
+});
 
 /**
- * POST /dev/create-test-user
- * Body: { phone: string, pin: string, name?: string, email?: string, role?: "subscriber"|"driver"|"admin" }
- * Quick helper for seeding users without SQL console.
+ * Seed a test user quickly (for local/dev)
+ * You can call: POST /dev/seed-user with JSON { phone, pin, name?, email? }
  */
-devRouter.post("/create-test-user", async (req: Request, res: Response) => {
+devRouter.post("/seed-user", async (req, res) => {
+  const { phone, pin, name, email } = req.body || {};
+
+  if (!phone || !pin) {
+    return res.status(400).json({
+      error: "phone and pin are required",
+    });
+  }
+
   try {
-    const {
-      phone,
-      pin,
-      name,
-      email,
-      role,
-    } = req.body as {
-      phone?: string;
-      pin?: string;
-      name?: string;
-      email?: string;
-      role?: "subscriber" | "driver" | "admin";
-    };
-
-    if (!phone || !pin) {
-      return res
-        .status(400)
-        .json({ error: "phone and pin are required for test user" });
-    }
-
-    const finalRole: "subscriber" | "driver" | "admin" =
-      role || "subscriber";
-
     const result = await pool.query(
-      `INSERT INTO users (email, name, role, phone, pin)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING id, email, name, role, phone`,
-      [email ?? null, name ?? null, finalRole, phone, pin]
+      `
+      INSERT INTO users (phone, pin, name, email, role)
+      VALUES ($1, $2, $3, $4, 'subscriber')
+      RETURNING id, phone, name, email, role
+    `,
+      [phone, pin, name || null, email || null]
     );
 
-    return res.json({
-      ok: true,
-      user: result.rows[0],
-    });
+    res.json({ ok: true, user: result.rows[0] });
   } catch (err) {
-    console.error("Error creating test user:", err);
-    return res
-      .status(500)
-      .json({ error: "Internal server error creating test user" });
+    console.error("Error creating user:", err);
+    res.status(500).json({ error: "Internal server error creating user" });
   }
 });
 
 /**
- * POST /dev/init-schedule-table
- * One-time helper to create the user_schedules table if it doesn't exist.
+ * Manual scheduler trigger.
+ *
+ * Call:
+ *   POST /dev/run-scheduler
+ * With optional JSON:
+ *   { "targetDate": "2025-11-22" }
+ *
+ * If targetDate omitted, uses "tomorrow" in UTC by default.
  */
-devRouter.get(
-  "/init-schedule-table",
-  async (req: Request, res: Response) => {
-    try {
-      await pool.query(`
-        CREATE TABLE IF NOT EXISTS user_schedules (
-          id SERIAL PRIMARY KEY,
-          user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-          day_of_week INTEGER NOT NULL, -- 0=Sunday, 6=Saturday
-          direction VARCHAR(20) NOT NULL, -- 'to_work' or 'to_home'
-          arrival_time TIME NOT NULL,
-          created_at TIMESTAMPTZ DEFAULT now()
-        );
-      `);
+devRouter.post("/run-scheduler", async (req, res) => {
+  try {
+    let target: Date;
 
-      return res.json({ ok: true, message: "user_schedules table ensured." });
-    } catch (err) {
-      console.error("Error creating user_schedules table:", err);
-      return res
-        .status(500)
-        .json({ error: "Failed to init user_schedules table" });
+    if (req.body?.targetDate) {
+      // If caller provides YYYY-MM-DD, use that
+      const parsed = new Date(req.body.targetDate);
+      if (isNaN(parsed.getTime())) {
+        return res.status(400).json({ error: "Invalid targetDate" });
+      }
+      target = parsed;
+    } else {
+      // Default: "tomorrow", to generate next day’s rides
+      const now = new Date();
+      target = new Date(
+        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)
+      );
     }
+
+    const { createdCount, skippedExisting, skippedFullSlots } =
+      await generateRidesForDate(target);
+
+    res.json({
+      ok: true,
+      targetDate: target.toISOString().slice(0, 10),
+      createdCount,
+      skippedExisting,
+      skippedFullSlots,
+    });
+  } catch (err) {
+    console.error("Error running scheduler:", err);
+    res.status(500).json({ error: "Internal server error running scheduler" });
   }
-);
+});
 
 export default devRouter;
