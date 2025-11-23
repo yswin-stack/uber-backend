@@ -10,6 +10,30 @@ const authRouter = express.Router();
  * - If 11 digits starting with "1" → +1XXXXXXXXXX
  * - Else fallback to trimmed string
  */
+// ✓ Named export
+export function normalizePhone(input: string): string {
+  const trimmed = input.trim();
+  const digits = trimmed.replace(/\D/g, "");
+
+  // 10 digits → assume Canadian local phone, add +1
+  if (digits.length === 10) {
+    return `+1${digits}`;
+  }
+
+  // Already starts with +
+  if (trimmed.startsWith("+")) {
+    return trimmed;
+  }
+
+  // 11 digits starting with 1 → assume +1
+  if (digits.length === 11 && digits.startsWith("1")) {
+    return `+${digits}`;
+  }
+
+  return trimmed;
+}
+
+
 function normalizePhone(input: string): string {
   export { normalizePhone };
   const trimmed = input.trim();
