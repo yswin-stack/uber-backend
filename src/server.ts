@@ -13,6 +13,8 @@ import { creditsRouter } from "./routes/credits";
 import adminRouter from "./routes/admin";
 import userRouter from "./routes/user";
 import slotsRouter from "./routes/slots";
+import creditsRouter from "./routes/credits";
+
 
 
 
@@ -46,6 +48,8 @@ app.use("/dev", devRouter);
 app.use("/user", userRouter);
 app.use("/slots", slotsRouter);
 app.use("/admin", adminRouter);
+app.use("/credits", creditsRouter);
+
 
 
 
