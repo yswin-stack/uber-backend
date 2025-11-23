@@ -8,7 +8,7 @@ import { initDb } from "./db/init";
 import { ridesRouter } from "./routes/rides";
 import authRouter from "./routes/auth";
 import devRouter from "./routes/dev";
-import { scheduleRouter } from "./routes/schedule";
+import scheduleRouter from "./routes/schedule";
 import { creditsRouter } from "./routes/credits";
 import adminRouter from "./routes/admin";
 import userRouter from "./routes/user";
