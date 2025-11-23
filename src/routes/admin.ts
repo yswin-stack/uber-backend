@@ -187,5 +187,142 @@ adminRouter.get("/ai/config", async (req: Request, res: Response) => {
   return res.json(cfg);
 });
 
+/**
+ * POST /admin/load-insights/run
+ *
+ * Runs the nightly predictive load balancer for a given day.
+ * - If body.day or ?day=YYYY-MM-DD is provided, uses that.
+ * - Otherwise defaults to "tomorrow" (UTC).
+ */
+adminRouter.post(
+  "/load-insights/run",
+  async (req: Request, res: Response) => {
+    if (!ensureAdmin(req, res)) return;
+
+    try {
+      const bodyDay: string | undefined = req.body?.day;
+      const queryDay: string | undefined =
+        typeof req.query.day === "string" ? req.query.day : undefined;
+      const dayStr = bodyDay || queryDay || null;
+
+      let target: Date;
+      if (dayStr) {
+        const parsed = new Date(dayStr);
+        if (Number.isNaN(parsed.getTime())) {
+          return res
+            .status(400)
+            .json({ error: "Invalid day format. Use YYYY-MM-DD." });
+        }
+        target = parsed;
+      } else {
+        const now = new Date();
+        // Default: tomorrow in UTC
+        target = new Date(
+          Date.UTC(
+            now.getUTCFullYear(),
+            now.getUTCMonth(),
+            now.getUTCDate() + 1,
+            0,
+            0,
+            0,
+            0
+          )
+        );
+      }
+
+      const insight = await runPredictiveLoadBalancer(target);
+      return res.json({ ok: true, insight });
+    } catch (err) {
+      console.error("Error running predictive load balancer:", err);
+      return res
+        .status(500)
+        .json({ error: "Failed to run predictive load balancer." });
+    }
+  }
+);
+
+/**
+ * GET /admin/load-insights
+ *
+ * Reads the latest daily_load_insights row for a given day.
+ * - If ?day=YYYY-MM-DD provided, uses that.
+ * - Otherwise defaults to "tomorrow" (UTC).
+ */
+adminRouter.get(
+  "/load-insights",
+  async (req: Request, res: Response) => {
+    if (!ensureAdmin(req, res)) return;
+
+    try {
+      const queryDay: string | undefined =
+        typeof req.query.day === "string" ? req.query.day : undefined;
+
+      let target: Date;
+      if (queryDay) {
+        const parsed = new Date(queryDay);
+        if (Number.isNaN(parsed.getTime())) {
+          return res
+            .status(400)
+            .json({ error: "Invalid day format. Use YYYY-MM-DD." });
+        }
+        target = parsed;
+      } else {
+        const now = new Date();
+        target = new Date(
+          Date.UTC(
+            now.getUTCFullYear(),
+            now.getUTCMonth(),
+            now.getUTCDate() + 1,
+            0,
+            0,
+            0,
+            0
+          )
+        );
+      }
+
+      const dayStr = target.toISOString().slice(0, 10);
+
+      // Ensure table exists (in case GET is called before POST /run)
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS daily_load_insights (
+          id SERIAL PRIMARY KEY,
+          day DATE NOT NULL,
+          generated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          total_rides INTEGER NOT NULL,
+          recommended_start_time TIMESTAMPTZ,
+          overbooked_slots JSONB,
+          at_risk_rides JSONB
+        )
+      `);
+
+      const result = await pool.query(
+        `
+        SELECT *
+        FROM daily_load_insights
+        WHERE day = $1
+        ORDER BY generated_at DESC
+        LIMIT 1
+        `,
+        [dayStr]
+      );
+
+      if (result.rowCount === 0) {
+        return res
+          .status(404)
+          .json({ error: "No load insights for that day yet." });
+      }
+
+      return res.json({ insight: result.rows[0] });
+    } catch (err) {
+      console.error("Error reading load insights:", err);
+      return res
+        .status(500)
+        .json({ error: "Failed to load predictive insights." });
+    }
+  }
+);
+
 export { adminRouter };
 export default adminRouter;
+
