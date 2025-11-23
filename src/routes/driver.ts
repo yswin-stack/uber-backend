@@ -18,6 +18,9 @@ const ALLOWED_NEXT_STATUSES: Record<string, DriverStatus[]> = {
   in_progress: ["completed"],
 };
 
+const FREE_WAIT_MINUTES = 2; // free wait
+const WAIT_PRICE_PER_MIN_CENTS = 100; // $1.00 per minute after free
+
 function getUserIdFromHeader(req: Request): number | null {
   const h = req.header("x-user-id");
   if (!h) return null;
@@ -43,9 +46,20 @@ async function ensureDriverOrAdmin(userId: number): Promise<"driver" | "admin"> 
   return role as "driver" | "admin";
 }
 
+function getMonthStart(date: Date): string {
+  const d = new Date(date);
+  d.setUTCDate(1);
+  d.setUTCHours(0, 0, 0, 0);
+  return d.toISOString().slice(0, 10); // YYYY-MM-DD
+}
+
+function minutesBetween(a: Date, b: Date): number {
+  return (b.getTime() - a.getTime()) / 60_000;
+}
+
 /**
  * GET /driver/rides/today
- * Driver daily plan (for now: all rides today; future-ready for multi-driver).
+ * Driver daily plan (for now: single driver; future-ready for multi-driver).
  */
 driverRouter.get("/rides/today", async (req: Request, res: Response) => {
   const userId = getUserIdFromHeader(req);
@@ -110,6 +124,10 @@ driverRouter.get("/rides/today", async (req: Request, res: Response) => {
 /**
  * POST /driver/rides/:id/status
  * Body: { status: "driver_en_route" | "arrived" | "in_progress" | "completed" | "no_show" }
+ *
+ * - arrived   → sets arrived_at
+ * - in_progress → sets in_progress_at, wait_minutes, wait_charge_cents
+ * - completed → sets completed_at, late_minutes, compensation_type, auto full refund at ≥10 min late
  */
 driverRouter.post(
   "/rides/:id/status",
@@ -153,7 +171,20 @@ driverRouter.post(
 
       const rideRes = await client.query(
         `
-        SELECT id, user_id, status, pickup_time
+        SELECT
+          id,
+          user_id,
+          status,
+          ride_type,
+          pickup_time,
+          arrival_target_time,
+          arrived_at,
+          in_progress_at,
+          wait_minutes,
+          wait_charge_cents,
+          late_minutes,
+          compensation_type,
+          compensation_applied
         FROM rides
         WHERE id = $1
         FOR UPDATE
@@ -170,7 +201,16 @@ driverRouter.post(
         id: number;
         user_id: number;
         status: string;
+        ride_type: string;
         pickup_time: string | null;
+        arrival_target_time: string | null;
+        arrived_at: string | null;
+        in_progress_at: string | null;
+        wait_minutes: number;
+        wait_charge_cents: number;
+        late_minutes: number;
+        compensation_type: string;
+        compensation_applied: boolean;
       };
 
       const allowedNext = ALLOWED_NEXT_STATUSES[ride.status] || [];
@@ -181,31 +221,154 @@ driverRouter.post(
         });
       }
 
-      const nowIso = new Date().toISOString();
+      let updatedRideRow: any;
 
-      // Basic timestamp handling – richer wait/late logic comes in step 5.
-      let extraSet = "";
-      const params: any[] = [newStatus, userId, nowIso, rideId];
-
-      if (newStatus === "completed") {
-        extraSet = ", completed_at = $3";
+      //
+      // STATUS HANDLERS
+      //
+      if (newStatus === "driver_en_route") {
+        const updateRes = await client.query(
+          `
+          UPDATE rides
+          SET status = $1,
+              driver_id = COALESCE(driver_id, $2)
+          WHERE id = $3
+          RETURNING *
+          `,
+          [newStatus, userId, rideId]
+        );
+        updatedRideRow = updateRes.rows[0];
       } else if (newStatus === "arrived") {
-        extraSet = ", /* arrived_at placeholder */ ";
+        const nowIso = new Date().toISOString();
+        const arrivedIso = ride.arrived_at || nowIso;
+
+        const updateRes = await client.query(
+          `
+          UPDATE rides
+          SET status = $1,
+              driver_id = COALESCE(driver_id, $2),
+              arrived_at = $3
+          WHERE id = $4
+          RETURNING *
+          `,
+          [newStatus, userId, arrivedIso, rideId]
+        );
+        updatedRideRow = updateRes.rows[0];
       } else if (newStatus === "in_progress") {
-        extraSet = ", /* in_progress_at placeholder */ ";
+        const now = new Date();
+        const arrivedAt =
+          ride.arrived_at != null ? new Date(ride.arrived_at) : now;
+
+        const waitMinRaw = Math.floor(
+          Math.max(0, minutesBetween(arrivedAt, now))
+        );
+        const chargeMinutes = Math.max(0, waitMinRaw - FREE_WAIT_MINUTES);
+        const waitChargeCents = chargeMinutes * WAIT_PRICE_PER_MIN_CENTS;
+
+        const updateRes = await client.query(
+          `
+          UPDATE rides
+          SET status = $1,
+              driver_id = COALESCE(driver_id, $2),
+              arrived_at = $3,
+              in_progress_at = $4,
+              wait_minutes = $5,
+              wait_charge_cents = $6
+          WHERE id = $7
+          RETURNING *
+          `,
+          [
+            newStatus,
+            userId,
+            arrivedAt.toISOString(),
+            now.toISOString(),
+            waitMinRaw,
+            waitChargeCents,
+            rideId,
+          ]
+        );
+        updatedRideRow = updateRes.rows[0];
+      } else if (newStatus === "completed") {
+        const now = new Date();
+
+        // Compute late minutes vs arrival_target_time
+        let lateMinutes = 0;
+        if (ride.arrival_target_time) {
+          const target = new Date(ride.arrival_target_time);
+          const diff = Math.floor(minutesBetween(target, now));
+          if (diff > 0) {
+            lateMinutes = diff;
+          }
+        }
+
+        let compensationType = ride.compensation_type || "none";
+        let compensationApplied = !!ride.compensation_applied;
+
+        // Auto full refund at ≥10 minutes late (once only)
+        if (lateMinutes >= 10 && !compensationApplied) {
+          compensationType = "full_refund";
+
+          const pickupTime = ride.pickup_time
+            ? new Date(ride.pickup_time)
+            : now;
+          const monthStart = getMonthStart(pickupTime);
+          const isGrocery = ride.ride_type === "grocery";
+
+          const field = isGrocery ? "grocery_used" : "standard_used";
+
+          await client.query(
+            `
+            UPDATE ride_credits_monthly
+            SET ${field} = GREATEST(0, ${field} - 1)
+            WHERE user_id = $1 AND month_start = $2
+            `,
+            [ride.user_id, monthStart]
+          );
+
+          compensationApplied = true;
+        } else if (lateMinutes >= 5 && compensationType === "none") {
+          // Mark eligible for 50% off – driver/admin can act on this later
+          compensationType = "half_refund";
+        }
+
+        const updateRes = await client.query(
+          `
+          UPDATE rides
+          SET status = $1,
+              driver_id = COALESCE(driver_id, $2),
+              completed_at = $3,
+              late_minutes = $4,
+              compensation_type = $5,
+              compensation_applied = $6
+          WHERE id = $7
+          RETURNING *
+          `,
+          [
+            newStatus,
+            userId,
+            now.toISOString(),
+            lateMinutes,
+            compensationType,
+            compensationApplied,
+            rideId,
+          ]
+        );
+        updatedRideRow = updateRes.rows[0];
+      } else if (newStatus === "no_show") {
+        const nowIso = new Date().toISOString();
+        const updateRes = await client.query(
+          `
+          UPDATE rides
+          SET status = $1,
+              driver_id = COALESCE(driver_id, $2),
+              completed_at = $3
+          WHERE id = $4
+          RETURNING *
+          `,
+          [newStatus, userId, nowIso, rideId]
+        );
+        updatedRideRow = updateRes.rows[0];
       }
-
-      const updateSql = `
-        UPDATE rides
-        SET status = $1,
-            driver_id = COALESCE(driver_id, $2)
-            ${extraSet}
-        WHERE id = $4
-        RETURNING *
-      `;
-
-      const updatedRes = await client.query(updateSql, params);
-      const updatedRide = updatedRes.rows[0];
 
       await client.query("COMMIT");
 
@@ -217,8 +380,9 @@ driverRouter.post(
         "completed",
       ];
 
-      if (smsStatuses.includes(newStatus)) {
-        const pickupIso = ride.pickup_time || updatedRide.pickup_time || null;
+      if (newStatus !== "no_show" && smsStatuses.includes(newStatus)) {
+        const pickupIso =
+          updatedRideRow?.pickup_time || ride.pickup_time || null;
         await sendRideStatusNotification(
           ride.user_id,
           ride.id,
@@ -229,7 +393,7 @@ driverRouter.post(
 
       return res.json({
         ok: true,
-        ride: updatedRide,
+        ride: updatedRideRow,
       });
     } catch (err) {
       await client.query("ROLLBACK");
