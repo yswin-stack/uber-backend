@@ -47,6 +47,8 @@ app.use("/dev", devRouter);
 app.use("/admin", adminRouter); // ⬅️ add this line
 app.use("/user", userRouter);
 app.use("/slots", slotsRouter);
+app.use("/admin", adminRouter);
+
 
 
 // SOCKET.IO for live driver tracking
