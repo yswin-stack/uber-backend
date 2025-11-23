@@ -1,5 +1,9 @@
 import { Router, Request, Response } from "express";
 import { pool } from "../db/pool";
+import {
+  getReferralSummaryForUser,
+  recordReferralUsage,
+} from "../services/referrals";
 
 const userRouter = Router();
 
@@ -16,11 +20,23 @@ userRouter.get("/me", async (req: Request, res: Response) => {
   try {
     const userId = getUserIdFromHeader(req);
     if (!userId) {
-      return res.status(401).json({ error: "Missing or invalid x-user-id header." });
+      return res
+        .status(401)
+        .json({ error: "Missing or invalid x-user-id header." });
     }
 
     const result = await pool.query(
-      "SELECT id, email, name, role, phone FROM users WHERE id = $1",
+      `
+      SELECT
+        id,
+        name,
+        email,
+        phone,
+        role,
+        created_at
+      FROM users
+      WHERE id = $1
+      `,
       [userId]
     );
 
@@ -28,120 +44,71 @@ userRouter.get("/me", async (req: Request, res: Response) => {
       return res.status(404).json({ error: "User not found." });
     }
 
-    return res.json({
-      ok: true,
-      user: result.rows[0],
-    });
+    const user = result.rows[0];
+
+    return res.json({ user });
   } catch (err) {
     console.error("Error in GET /user/me:", err);
     return res.status(500).json({ error: "Internal server error." });
   }
 });
 
-// PATCH /user/me  -> update name / email
-userRouter.patch("/me", async (req: Request, res: Response) => {
-  try {
-    const userId = getUserIdFromHeader(req);
-    if (!userId) {
-      return res.status(401).json({ error: "Missing or invalid x-user-id header." });
-    }
-
-    const { name, email } = req.body as {
-      name?: string;
-      email?: string;
-    };
-
-    if (!name && !email) {
-      return res.status(400).json({ error: "Nothing to update." });
-    }
-
-    const result = await pool.query(
-      `UPDATE users
-       SET
-         name = COALESCE($1, name),
-         email = COALESCE($2, email)
-       WHERE id = $3
-       RETURNING id, email, name, role, phone`,
-      [name ?? null, email ?? null, userId]
-    );
-
-    if (result.rowCount === 0) {
-      return res.status(404).json({ error: "User not found." });
-    }
-
-    return res.json({
-      ok: true,
-      user: result.rows[0],
-    });
-  } catch (err) {
-    console.error("Error in PATCH /user/me:", err);
-    return res.status(500).json({ error: "Internal server error." });
-  }
-});
-
-// GET /user/shortcuts  -> work / school saved locations
+// GET /user/shortcuts
+// - returns saved short-cuts for this user
 userRouter.get("/shortcuts", async (req: Request, res: Response) => {
-  try {
-    const userId = getUserIdFromHeader(req);
-    if (!userId) {
-      return res.status(401).json({ error: "Missing or invalid x-user-id header." });
-    }
+  const userId = getUserIdFromHeader(req);
+  if (!userId) {
+    return res
+      .status(401)
+      .json({ error: "Missing or invalid x-user-id header." });
+  }
 
+  try {
     const result = await pool.query(
-      `SELECT id, label, address, lat, lng
-       FROM saved_locations
-       WHERE user_id = $1`,
+      `
+      SELECT id, label, address, lat, lng, created_at
+      FROM saved_locations
+      WHERE user_id = $1
+      ORDER BY created_at ASC
+      `,
       [userId]
     );
 
-    const shortcuts: {
-      work: any | null;
-      school: any | null;
-    } = {
-      work: null,
-      school: null,
-    };
-
-    for (const row of result.rows) {
-      if (row.label === "work") {
-        shortcuts.work = row;
-      } else if (row.label === "school") {
-        shortcuts.school = row;
-      }
-    }
-
-    return res.json({
-      ok: true,
-      shortcuts,
-    });
+    return res.json({ shortcuts: result.rows });
   } catch (err) {
     console.error("Error in GET /user/shortcuts:", err);
     return res.status(500).json({ error: "Internal server error." });
   }
 });
 
-// POST /user/shortcuts  -> upsert work/school shortcut
-// Body: { label: "work" | "school", address: string, lat?: number, lng?: number }
+// POST /user/shortcuts
+// - upsert 'work' / 'school' addresses etc.
 userRouter.post("/shortcuts", async (req: Request, res: Response) => {
-  try {
-    const userId = getUserIdFromHeader(req);
-    if (!userId) {
-      return res.status(401).json({ error: "Missing or invalid x-user-id header." });
-    }
+  const userId = getUserIdFromHeader(req);
+  if (!userId) {
+    return res
+      .status(401)
+      .json({ error: "Missing or invalid x-user-id header." });
+  }
 
-    const { label, address, lat, lng } = req.body as {
+  try {
+    const body = req.body as {
       label?: string;
       address?: string;
       lat?: number;
       lng?: number;
     };
 
+    const { label, address, lat, lng } = body;
+
     if (!label || !address) {
       return res.status(400).json({ error: "label and address are required." });
     }
 
     if (label !== "work" && label !== "school") {
-      return res.status(400).json({ error: "label must be 'work' or 'school'." });
+      return res
+        .status(400)
+        .json({ error: "label must be 'work' or 'school'." });
     }
 
     // Simple upsert: delete old, insert new
@@ -151,9 +118,11 @@ userRouter.post("/shortcuts", async (req: Request, res: Response) => {
     );
 
     const insert = await pool.query(
-      `INSERT INTO saved_locations (user_id, label, address, lat, lng)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING id, label, address, lat, lng`,
+      `
+      INSERT INTO saved_locations (user_id, label, address, lat, lng)
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING id, label, address, lat, lng, created_at
+      `,
       [userId, label, address, lat ?? null, lng ?? null]
     );
 
@@ -164,6 +133,58 @@ userRouter.post("/shortcuts", async (req: Request, res: Response) => {
   } catch (err) {
     console.error("Error in POST /user/shortcuts:", err);
     return res.status(500).json({ error: "Internal server error." });
+  }
+});
+
+// GET /user/referral
+// - Returns the user's referral_code and simple stats.
+userRouter.get("/referral", async (req: Request, res: Response) => {
+  const userId = getUserIdFromHeader(req);
+  if (!userId) {
+    return res
+      .status(401)
+      .json({ error: "Missing or invalid x-user-id header." });
+  }
+
+  try {
+    const summary = await getReferralSummaryForUser(userId);
+    if (!summary) {
+      return res.status(404).json({ error: "User not found." });
+    }
+    return res.json(summary);
+  } catch (err) {
+    console.error("Error in GET /user/referral:", err);
+    return res.status(500).json({ error: "Internal server error." });
+  }
+});
+
+// POST /user/referral/use
+// - Record that the current user used a referral code.
+// - Business rule: can only be used once per referred user.
+userRouter.post("/referral/use", async (req: Request, res: Response) => {
+  const userId = getUserIdFromHeader(req);
+  if (!userId) {
+    return res
+      .status(401)
+      .json({ error: "Missing or invalid x-user-id header." });
+  }
+
+  const referralCode: string | undefined =
+    req.body?.referralCode || req.body?.referral_code;
+  if (!referralCode || !referralCode.trim()) {
+    return res.status(400).json({ error: "referralCode is required." });
+  }
+
+  try {
+    await recordReferralUsage(userId, referralCode.trim());
+    return res.json({ ok: true });
+  } catch (err: any) {
+    console.error("Error in POST /user/referral/use:", err);
+    const message =
+      typeof err.message === "string"
+        ? err.message
+        : "Failed to apply referral code.";
+    return res.status(400).json({ error: message });
   }
 });
 
