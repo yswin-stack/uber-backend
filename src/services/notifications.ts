@@ -1,182 +1,257 @@
 import { pool } from "../db/pool";
 
-type RideStatus =
-  | "requested"
-  | "confirmed"
+// Optional Twilio support – if not configured, we just log to console.
+let twilioClient: any = null;
+
+const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
+const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
+const TWILIO_FROM_NUMBER = process.env.TWILIO_FROM_NUMBER;
+
+if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && TWILIO_FROM_NUMBER) {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const twilio = require("twilio");
+    twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
+    console.log("✅ Twilio SMS client initialized.");
+  } catch (err) {
+    console.warn("⚠️ Failed to initialize Twilio. SMS will be logged only.", err);
+    twilioClient = null;
+  }
+} else {
+  console.log(
+    "ℹ️ Twilio env vars not set (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER). SMS will be logged only."
+  );
+}
+
+type RideNotificationStatus =
+  | "booking_confirmed"
   | "driver_en_route"
   | "arrived"
   | "in_progress"
   | "completed"
-  | "cancelled";
-
-let twilioClient: any | null = null;
+  | "cancelled"
+  | "cancelled_by_user"
+  | "cancelled_by_admin";
 
 /**
- * Lazily initialize Twilio client.
- * If env vars are missing or twilio is not installed, returns null and logs a warning.
+ * Low-level SMS sender.
  */
-function getTwilioClient(): any | null {
-  if (twilioClient) return twilioClient;
+async function sendSms(phone: string, body: string): Promise<void> {
+  if (!phone) return;
 
-  const sid = process.env.TWILIO_ACCOUNT_SID;
-  const token = process.env.TWILIO_AUTH_TOKEN;
-  const from = process.env.TWILIO_FROM_NUMBER;
-
-  if (!sid || !token || !from) {
-    console.warn(
-      "[Twilio] Missing TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_FROM_NUMBER – SMS disabled."
-    );
-    return null;
+  if (!twilioClient || !TWILIO_FROM_NUMBER) {
+    console.log(`[SMS MOCK] to ${phone}: ${body}`);
+    return;
   }
 
   try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const twilio = require("twilio");
-    twilioClient = twilio(sid, token);
-    return twilioClient;
+    await twilioClient.messages.create({
+      from: TWILIO_FROM_NUMBER,
+      to: phone,
+      body,
+    });
+    console.log("[SMS] Sent to", phone);
   } catch (err) {
-    console.error("[Twilio] Failed to initialise Twilio client:", err);
-    return null;
+    console.error("❌ Failed to send SMS via Twilio:", err);
   }
 }
 
 /**
- * Simple helper to format pickup window like "8:10–8:20".
- * We’ll use a 10-minute window around the scheduled pickup time.
+ * Build a human-readable message based on ride + status.
  */
-function formatPickupWindow(pickupIso?: string | null): string | null {
-  if (!pickupIso) return null;
-  const d = new Date(pickupIso);
-  if (Number.isNaN(d.getTime())) return null;
+function buildStatusMessage(
+  status: RideNotificationStatus | string,
+  userName: string | null,
+  ride: {
+    pickup_location: string;
+    dropoff_location: string;
+    pickup_window_start: string | null;
+    pickup_window_end: string | null;
+    arrival_window_start: string | null;
+    arrival_window_end: string | null;
+  },
+  pickupTimeIso: string | null
+): string {
+  const namePrefix = userName ? `Hi ${userName}, ` : "";
 
-  const baseMinutes = d.getMinutes();
-  const floored = Math.floor(baseMinutes / 10) * 10;
-
-  const start = new Date(d.getTime());
-  start.setMinutes(floored, 0, 0);
-
-  const end = new Date(start.getTime() + 10 * 60 * 1000);
-
-  const format = (date: Date) => {
-    let h = date.getHours();
-    const m = date.getMinutes();
+  const formatTime = (iso: string | null) => {
+    if (!iso) return "";
+    const d = new Date(iso);
+    const h = d.getHours();
+    const m = d.getMinutes();
     const h12 = h % 12 === 0 ? 12 : h % 12;
     const mm = m.toString().padStart(2, "0");
     const suffix = h < 12 ? "AM" : "PM";
     return `${h12}:${mm} ${suffix}`;
   };
 
-  return `${format(start)}–${format(end)}`;
+  const pickupWindow =
+    ride.pickup_window_start && ride.pickup_window_end
+      ? `${formatTime(ride.pickup_window_start)}–${formatTime(
+          ride.pickup_window_end
+        )}`
+      : "";
+
+  const arrivalWindow =
+    ride.arrival_window_start && ride.arrival_window_end
+      ? `${formatTime(ride.arrival_window_start)}–${formatTime(
+          ride.arrival_window_end
+        )}`
+      : "";
+
+  const pickupTimeLabel = pickupTimeIso ? formatTime(pickupTimeIso) : "";
+
+  switch (status) {
+    case "booking_confirmed":
+      return (
+        namePrefix +
+        `your ride is booked: ${ride.pickup_location} → ${ride.dropoff_location}. ` +
+        (pickupWindow
+          ? `Pickup window: ${pickupWindow}.`
+          : pickupTimeLabel
+          ? `Pickup around ${pickupTimeLabel}.`
+          : "")
+      );
+
+    case "driver_en_route":
+      return (
+        namePrefix +
+        `your driver is on the way to ${ride.pickup_location}. ` +
+        (pickupWindow ? `Pickup window: ${pickupWindow}.` : "")
+      );
+
+    case "arrived":
+      return (
+        namePrefix +
+        `your driver has arrived at ${ride.pickup_location}. Please head outside.`
+      );
+
+    case "in_progress":
+      return (
+        namePrefix +
+        `you’re on the way to ${ride.dropoff_location}. ` +
+        (arrivalWindow ? `Arrival window: ${arrivalWindow}.` : "")
+      );
+
+    case "completed":
+      return (
+        namePrefix +
+        `your ride from ${ride.pickup_location} to ${ride.dropoff_location} is complete. Thank you!`
+      );
+
+    case "cancelled":
+    case "cancelled_by_user":
+      return namePrefix + "your ride has been cancelled.";
+
+    case "cancelled_by_admin":
+      return (
+        namePrefix +
+        "your ride has been cancelled by the service. Please check the app or contact support if needed."
+      );
+
+    default:
+      return (
+        namePrefix +
+        `your ride status changed (${status}). Check the app for the latest details.`
+      );
+  }
 }
 
 /**
- * Build the SMS text for the given ride status.
- */
-function buildMessageForStatus(
-  status: RideStatus,
-  pickupTimeIso?: string | null
-): string | null {
-  const window = formatPickupWindow(pickupTimeIso);
-
-  if (status === "confirmed") {
-    return window
-      ? `Your UniCab ride is confirmed for ${window}. Reply STOP to unsubscribe.`
-      : `Your UniCab ride is confirmed. Reply STOP to unsubscribe.`;
-  }
-
-  if (status === "driver_en_route") {
-    return "Your UniCab driver is on the way. ETA about 6–8 minutes.";
-  }
-
-  if (status === "arrived") {
-    return "Your UniCab driver has arrived outside your pickup point.";
-  }
-
-  // For other statuses, we currently don’t send SMS
-  return null;
-}
-
-/**
- * Best-effort insert into notifications table.
- * This is wrapped in try/catch so a mismatch in schema doesn’t break the app.
- */
-async function insertNotificationRow(
-  userId: number,
-  rideId: number | null,
-  status: RideStatus,
-  message: string
-): Promise<void> {
-  try {
-    await pool.query(
-      `
-      INSERT INTO notifications (user_id, ride_id, channel, type, message)
-      VALUES ($1, $2, 'sms', 'ride_status', $3)
-    `,
-      [userId, rideId, message]
-    );
-  } catch (err) {
-    console.error("[Notifications] Failed to insert notification row:", err);
-    // swallow error – don't crash the request
-  }
-}
-
-/**
- * Send Twilio SMS if user has a phone.
- * Also logs into notifications table.
- *
- * Safe to call from routes – it will not throw fatal errors up the stack.
+ * Main helper used by routes.
+ * - Looks up user phone/name and ride info
+ * - Builds message
+ * - Sends SMS (or logs it)
+ * - Inserts row into notifications table
  */
 export async function sendRideStatusNotification(
   userId: number,
   rideId: number,
-  status: RideStatus,
+  status: RideNotificationStatus | string,
   pickupTimeIso?: string | null
 ): Promise<void> {
-  const message = buildMessageForStatus(status, pickupTimeIso);
-  if (!message) {
-    // No SMS defined for this status
-    return;
-  }
-
-  // 1) Insert notification row (best effort)
-  await insertNotificationRow(userId, rideId, status, message);
-
-  // 2) Try to send SMS via Twilio
-  const client = getTwilioClient();
-  const from = process.env.TWILIO_FROM_NUMBER;
-
-  if (!client || !from) {
-    console.warn("[Twilio] Skipping SMS send – client not configured.");
-    return;
-  }
-
   try {
     const userRes = await pool.query(
-      `SELECT phone FROM users WHERE id = $1`,
+      `
+      SELECT name, phone
+      FROM users
+      WHERE id = $1
+      `,
       [userId]
     );
-    if (userRes.rows.length === 0) {
-      console.warn("[Twilio] No user found for user_id", userId);
+
+    if (userRes.rowCount === 0) {
+      console.warn(
+        "[Notifications] Cannot send SMS – user not found:",
+        userId
+      );
       return;
     }
 
-    const phone: string | null = userRes.rows[0].phone || null;
+    const { name, phone } = userRes.rows[0] as {
+      name: string | null;
+      phone: string | null;
+    };
+
     if (!phone) {
-      console.warn("[Twilio] User has no phone – skipping SMS for user", userId);
+      console.warn(
+        "[Notifications] Skipping SMS – user has no phone on file:",
+        userId
+      );
       return;
     }
 
-    await client.messages.create({
-      body: message,
-      from,
-      to: phone,
-    });
+    const rideRes = await pool.query(
+      `
+      SELECT
+        pickup_location,
+        dropoff_location,
+        pickup_window_start,
+        pickup_window_end,
+        arrival_window_start,
+        arrival_window_end,
+        pickup_time
+      FROM rides
+      WHERE id = $1
+      `,
+      [rideId]
+    );
 
-    console.log(
-      `[Twilio] Sent SMS to user ${userId} for ride ${rideId} status ${status}`
+    if (rideRes.rowCount === 0) {
+      console.warn("[Notifications] Cannot send SMS – ride not found:", rideId);
+      return;
+    }
+
+    const ride = rideRes.rows[0] as {
+      pickup_location: string;
+      dropoff_location: string;
+      pickup_window_start: string | null;
+      pickup_window_end: string | null;
+      arrival_window_start: string | null;
+      arrival_window_end: string | null;
+      pickup_time: string | null;
+    };
+
+    const effectivePickupTimeIso =
+      pickupTimeIso || ride.pickup_time || null;
+
+    const message = buildStatusMessage(
+      status as RideNotificationStatus,
+      name,
+      ride,
+      effectivePickupTimeIso
+    );
+
+    await sendSms(phone, message);
+
+    await pool.query(
+      `
+      INSERT INTO notifications (user_id, ride_id, channel, message)
+      VALUES ($1, $2, $3, $4)
+      `,
+      [userId, rideId, "sms", message]
     );
   } catch (err) {
-    console.error("[Twilio] Failed to send SMS:", err);
-    // Do not rethrow – we don't want to break the API response.
+    console.error("[Notifications] Failed to send ride status notification:", err);
   }
 }
