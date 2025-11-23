@@ -13,17 +13,18 @@ export function normalizePhone(input: string): string {
   const trimmed = input.trim();
   const digits = trimmed.replace(/\D/g, "");
 
+  // 10 digits -> +1XXXXXXXXXX
   if (digits.length === 10) {
-    // e.g. 4313389073 -> +14313389073
     return `+1${digits}`;
   }
 
+  // Already has +
   if (trimmed.startsWith("+")) {
     return trimmed;
   }
 
+  // 11 digits starting with 1 -> +XXXXXXXXXXX
   if (digits.length === 11 && digits.startsWith("1")) {
-    // e.g. 14313389073 -> +14313389073
     return `+${digits}`;
   }
 
@@ -69,13 +70,13 @@ authRouter.post("/login", async (req, res) => {
       return res.status(401).json({ error: "Invalid phone or PIN." });
     }
 
-    // Decide role based on WHAT THE USER TYPED (normalized)
+    // Decide role based on the normalized phone they used to log in
     let role: string = user.role || "rider";
 
     if (normalizedPhone === ADMIN_PHONE) {
       role = "admin";
       try {
-        // keep DB in sync
+        // keep DB in sync too
         await pool.query(`UPDATE users SET role = 'admin' WHERE id = $1`, [
           user.id,
         ]);
@@ -94,7 +95,7 @@ authRouter.post("/login", async (req, res) => {
 
     return res.json({
       user: safeUser,
-      token: null,
+      token: null, // JWT later
     });
   } catch (err) {
     console.error("Error in POST /auth/login:", err);
