@@ -482,4 +482,6 @@ ridesRouter.post("/:id/cancel", async (req: Request, res: Response) => {
   }
 });
 
+export { ridesRouter };
 export default ridesRouter;
+
