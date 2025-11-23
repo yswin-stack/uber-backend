@@ -5,10 +5,6 @@ import { sendRideStatusNotification } from "../services/notifications";
 
 const ridesRouter = express.Router();
 
-// ----------------------
-// Types & constants
-// ----------------------
-
 type RideStatus =
   | "requested"
   | "confirmed"
@@ -20,10 +16,6 @@ type RideStatus =
 
 const SLOT_WINDOW_MINUTES = 15;
 const MAX_RIDES_PER_SLOT = 4;
-
-// ----------------------
-// Helper functions
-// ----------------------
 
 function computeSlotWindow(pickup: Date): { slotStart: Date; slotEnd: Date } {
   const slotStart = new Date(pickup.getTime());
@@ -164,7 +156,6 @@ ridesRouter.post("/", async (req, res) => {
 
     const ride = result.rows[0];
 
-    // 🔔 treat booking as "confirmed" for SMS language
     try {
       await sendRideStatusNotification(
         userId,
@@ -232,7 +223,7 @@ ridesRouter.get("/user", async (req, res) => {
 });
 
 // ----------------------
-// GET /rides/driver
+// GET /rides/driver  (today's rides)
 // ----------------------
 
 ridesRouter.get("/driver", async (req, res) => {
@@ -269,31 +260,35 @@ ridesRouter.get("/driver", async (req, res) => {
     const result = await pool.query(
       `
       SELECT
-        r.id,
-        r.user_id,
-        u.phone AS user_name,           -- phone used as "name" for now
-        r.pickup_address,
-        r.dropoff_address,
-        r.pickup_lat,
-        r.pickup_lng,
-        r.dropoff_lat,
-        r.dropoff_lng,
-        r.pickup_time,
-        r.ride_type,
-        r.status
-      FROM rides r
-      JOIN users u ON u.id = r.user_id
-      WHERE r.pickup_time >= $1
-        AND r.pickup_time <= $2
-        AND r.status <> 'cancelled'
-      ORDER BY r.pickup_time ASC
+        id,
+        user_id,
+        pickup_address,
+        dropoff_address,
+        pickup_lat,
+        pickup_lng,
+        dropoff_lat,
+        dropoff_lng,
+        pickup_time,
+        ride_type,
+        status
+      FROM rides
+      WHERE pickup_time >= $1
+        AND pickup_time <= $2
+        AND status <> 'cancelled'
+      ORDER BY pickup_time ASC
     `,
       [dayStart.toISOString(), dayEnd.toISOString()]
     );
 
+    // add a computed "user_name" so frontend can show something
+    const rides = result.rows.map((r) => ({
+      ...r,
+      user_name: `Rider #${r.user_id}`,
+    }));
+
     res.json({
       ok: true,
-      rides: result.rows,
+      rides,
     });
   } catch (err) {
     console.error("Error in GET /rides/driver:", err);
@@ -310,25 +305,27 @@ ridesRouter.get("/admin", async (_req, res) => {
     const result = await pool.query(
       `
       SELECT
-        r.id,
-        r.user_id,
-        u.phone AS user_name,            -- again, phone as name
-        u.phone,
-        r.pickup_address,
-        r.dropoff_address,
-        r.pickup_time,
-        r.ride_type,
-        r.status
-      FROM rides r
-      JOIN users u ON u.id = r.user_id
-      ORDER BY r.pickup_time DESC
+        id,
+        user_id,
+        pickup_address,
+        dropoff_address,
+        pickup_time,
+        ride_type,
+        status
+      FROM rides
+      ORDER BY pickup_time DESC
       LIMIT 100
     `
     );
 
+    const rides = result.rows.map((r) => ({
+      ...r,
+      user_name: `Rider #${r.user_id}`,
+    }));
+
     res.json({
       ok: true,
-      rides: result.rows,
+      rides,
     });
   } catch (err) {
     console.error("Error in GET /rides/admin:", err);
@@ -444,7 +441,6 @@ ridesRouter.post("/:id/status", async (req, res) => {
 
     const updated = updatedRes.rows[0];
 
-    // consume credit on completion
     if (prevStatus !== "completed" && status === "completed") {
       const typeForCredit: "standard" | "grocery" =
         rideType === "grocery" ? "grocery" : "standard";
@@ -456,7 +452,6 @@ ridesRouter.post("/:id/status", async (req, res) => {
       }
     }
 
-    // SMS notifications for key transitions
     if (status === "driver_en_route" || status === "arrived") {
       try {
         await sendRideStatusNotification(
