@@ -1,5 +1,6 @@
 import { Router, Request, Response } from "express";
 import { pool } from "../db/pool";
+import { getAiConfig } from "../services/aiConfig";
 
 const adminRouter = Router();
 
@@ -82,14 +83,15 @@ adminRouter.get("/metrics/today", async (req: Request, res: Response) => {
     const cancelled = Number(cancelledRes.rows[0].count);
     const late = Number(lateRes.rows[0].count);
 
-    const onTime = completed === 0 ? 100 : Math.max(0, 100 - (late / completed) * 100);
+    const onTime =
+      completed === 0 ? 100 : Math.max(0, 100 - (late / completed) * 100);
 
     return res.json({
       total_rides: total,
       completed,
       cancelled,
       late,
-      on_time_percent: onTime.toFixed(1)
+      on_time_percent: onTime.toFixed(1),
     });
   } catch (err) {
     console.error("Admin metrics today error:", err);
@@ -104,7 +106,9 @@ adminRouter.get("/metrics/this-month", async (req: Request, res: Response) => {
   if (!ensureAdmin(req, res)) return;
 
   const now = new Date();
-  const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const monthStart = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)
+  );
 
   try {
     const riderCount = await pool.query(
@@ -140,8 +144,7 @@ adminRouter.get("/metrics/this-month", async (req: Request, res: Response) => {
 
 /**
  * GET /admin/schedule/today
- * - This powers admin’s “Timeline View”
- * - Same format as driver timeline but includes ALL rides and windows
+ * - Admin timeline view
  */
 adminRouter.get("/schedule/today", async (req: Request, res: Response) => {
   if (!ensureAdmin(req, res)) return;
@@ -163,7 +166,7 @@ adminRouter.get("/schedule/today", async (req: Request, res: Response) => {
     );
 
     return res.json({
-      rides: ridesRes.rows
+      rides: ridesRes.rows,
     });
   } catch (err) {
     console.error("Admin schedule load error:", err);
@@ -174,20 +177,12 @@ adminRouter.get("/schedule/today", async (req: Request, res: Response) => {
 /**
  * GET /admin/ai/config
  * - Exposes current AI tuning values (speed, snow penalties, etc.)
- * - For now we return static values until Step 8/10 introduces DB config.
  */
 adminRouter.get("/ai/config", async (req: Request, res: Response) => {
   if (!ensureAdmin(req, res)) return;
 
-  return res.json({
-    travel_speed_kmh: 25,
-    winter_speed_kmh: 14,
-    snow_penalty_percent: 18,
-    pickup_window_size: 10,
-    arrival_window_size: 10,
-    max_rides_per_hour: 4,
-    overlap_buffer_minutes: 30
-  });
+  const cfg = getAiConfig();
+  return res.json(cfg);
 });
 
 export { adminRouter };
