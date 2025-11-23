@@ -3,19 +3,17 @@ import { pool } from "../db/pool";
 
 const authRouter = express.Router();
 
+// your super-admin phone
+const ADMIN_PHONE = "+14313389073";
+
 /**
  * Normalize phone into a canonical format that matches DB.
- * - If user types 10-digit number like 204XXXXXXX → +1XXXXXXXXXX
- * - If starts with "+", keep as-is
- * - If 11 digits starting with "1" → +1XXXXXXXXXX
- * - Else fallback to trimmed string
  */
 export function normalizePhone(input: string): string {
   const trimmed = input.trim();
   const digits = trimmed.replace(/\D/g, "");
 
   if (digits.length === 10) {
-    // e.g. 2041234567
     return `+1${digits}`;
   }
 
@@ -32,8 +30,6 @@ export function normalizePhone(input: string): string {
 
 /**
  * POST /auth/login
- * Body: { phone: string, pin: string }
- * Returns: { user: { id, name, phone, email, role }, token? }
  */
 authRouter.post("/login", async (req, res) => {
   const { phone, pin } = req.body || {};
@@ -70,17 +66,23 @@ authRouter.post("/login", async (req, res) => {
       return res.status(401).json({ error: "Invalid phone or PIN." });
     }
 
+    // force admin role for your special phone
+    let role: string = user.role || "rider";
+    if (user.phone === ADMIN_PHONE) {
+      role = "admin";
+    }
+
     const safeUser = {
       id: user.id,
       name: user.name,
       phone: user.phone,
       email: user.email,
-      role: user.role || "rider",
+      role,
     };
 
     return res.json({
       user: safeUser,
-      token: null, // JWT later if you want
+      token: null,
     });
   } catch (err) {
     console.error("Error in POST /auth/login:", err);
@@ -90,9 +92,6 @@ authRouter.post("/login", async (req, res) => {
 
 /**
  * POST /auth/register
- * Simple rider signup used by your "Register" page.
- * Body: { phone, pin, name?, email? }
- * Returns: { user: { id, name, phone, email, role }, token? }
  */
 authRouter.post("/register", async (req, res) => {
   const { phone, pin, name, email } = req.body || {};
