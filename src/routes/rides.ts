@@ -280,7 +280,7 @@ ridesRouter.post("/", async (req: Request, res: Response) => {
       [userId, overlapStart.toISOString(), overlapEnd.toISOString()]
     );
 
-    if (overlapResult.rowCount > 0) {
+    if ((overlapResult.rowCount ?? 0) > 0) {
       return res.status(400).json({
         error:
           "You already have a ride near that time. We avoid overlapping rides within ±30 minutes.",
