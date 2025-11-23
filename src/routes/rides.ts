@@ -25,10 +25,6 @@ const MAX_RIDES_PER_SLOT = 4;
 // Helper functions
 // ----------------------
 
-/**
- * Compute slot window start & end for a given pickup_time.
- * Slot size is 15 minutes.
- */
 function computeSlotWindow(pickup: Date): { slotStart: Date; slotEnd: Date } {
   const slotStart = new Date(pickup.getTime());
   const minutes = slotStart.getUTCMinutes();
@@ -43,10 +39,6 @@ function computeSlotWindow(pickup: Date): { slotStart: Date; slotEnd: Date } {
   return { slotStart, slotEnd };
 }
 
-/**
- * Check if the slot for a given pickup time is full.
- * Counts all non-cancelled rides in the same slot.
- */
 async function isSlotFull(pickup: Date): Promise<boolean> {
   const { slotStart, slotEnd } = computeSlotWindow(pickup);
 
@@ -65,9 +57,6 @@ async function isSlotFull(pickup: Date): Promise<boolean> {
   return count >= MAX_RIDES_PER_SLOT;
 }
 
-/**
- * Parse userId from x-user-id header.
- */
 function parseUserIdFromHeader(req: express.Request): number | null {
   const headerVal = req.header("x-user-id") || "";
   const id = parseInt(headerVal, 10);
@@ -78,21 +67,6 @@ function parseUserIdFromHeader(req: express.Request): number | null {
 // ----------------------
 // POST /rides  (create booking)
 // ----------------------
-//
-// Body:
-// {
-//   pickup_address: string,
-//   dropoff_address: string,
-//   pickup_lat?: number,
-//   pickup_lng?: number,
-//   dropoff_lat?: number,
-//   dropoff_lng?: number,
-//   pickup_time: string (ISO),
-//   ride_type?: "standard" | "grocery",
-//   notes?: string
-// }
-//
-// Uses x-user-id header for now.
 
 ridesRouter.post("/", async (req, res) => {
   const userId = parseUserIdFromHeader(req);
@@ -133,7 +107,6 @@ ridesRouter.post("/", async (req, res) => {
     ride_type === "grocery" ? "grocery" : "standard";
 
   try {
-    // Slot capacity check (safety)
     const full = await isSlotFull(pickupDate);
     if (full) {
       return res.status(409).json({
@@ -191,7 +164,7 @@ ridesRouter.post("/", async (req, res) => {
 
     const ride = result.rows[0];
 
-    // 🔔 SMS: treat booking as "confirmed" in user-facing language
+    // 🔔 treat booking as "confirmed" for SMS language
     try {
       await sendRideStatusNotification(
         userId,
@@ -214,11 +187,8 @@ ridesRouter.post("/", async (req, res) => {
 });
 
 // ----------------------
-// GET /rides/user   (rider's rides)
+// GET /rides/user
 // ----------------------
-//
-// Uses x-user-id header.
-// Returns rides sorted by pickup_time ascending.
 
 ridesRouter.get("/user", async (req, res) => {
   const userId = parseUserIdFromHeader(req);
@@ -262,11 +232,8 @@ ridesRouter.get("/user", async (req, res) => {
 });
 
 // ----------------------
-// GET /rides/driver  (driver's rides for today)
+// GET /rides/driver
 // ----------------------
-//
-// Uses x-user-id header to identify driver (must have role = 'driver').
-// For now, returns all non-cancelled rides for today (single-driver model).
 
 ridesRouter.get("/driver", async (req, res) => {
   const driverId = parseUserIdFromHeader(req);
@@ -304,7 +271,7 @@ ridesRouter.get("/driver", async (req, res) => {
       SELECT
         r.id,
         r.user_id,
-        u.name AS user_name,
+        u.phone AS user_name,           -- phone used as "name" for now
         r.pickup_address,
         r.dropoff_address,
         r.pickup_lat,
@@ -335,7 +302,7 @@ ridesRouter.get("/driver", async (req, res) => {
 });
 
 // ----------------------
-// GET /rides/admin   (simple list for admin page)
+// GET /rides/admin
 // ----------------------
 
 ridesRouter.get("/admin", async (_req, res) => {
@@ -345,7 +312,7 @@ ridesRouter.get("/admin", async (_req, res) => {
       SELECT
         r.id,
         r.user_id,
-        u.name AS user_name,
+        u.phone AS user_name,            -- again, phone as name
         u.phone,
         r.pickup_address,
         r.dropoff_address,
@@ -370,7 +337,7 @@ ridesRouter.get("/admin", async (_req, res) => {
 });
 
 // ----------------------
-// GET /rides/:id   (details for tracking)
+// GET /rides/:id
 // ----------------------
 
 ridesRouter.get("/:id", async (req, res) => {
@@ -417,7 +384,7 @@ ridesRouter.get("/:id", async (req, res) => {
 });
 
 // ----------------------
-// POST /rides/:id/status   (status updates + credits + SMS)
+// POST /rides/:id/status
 // ----------------------
 
 ridesRouter.post("/:id/status", async (req, res) => {
@@ -443,7 +410,6 @@ ridesRouter.post("/:id/status", async (req, res) => {
   }
 
   try {
-    // Load current ride to know previous status, user & type & pickup_time
     const currentRes = await pool.query(
       `
       SELECT id, user_id, status, ride_type, pickup_time
@@ -478,7 +444,7 @@ ridesRouter.post("/:id/status", async (req, res) => {
 
     const updated = updatedRes.rows[0];
 
-    // If we just moved into "completed" from a non-completed status, consume credits
+    // consume credit on completion
     if (prevStatus !== "completed" && status === "completed") {
       const typeForCredit: "standard" | "grocery" =
         rideType === "grocery" ? "grocery" : "standard";
@@ -487,11 +453,10 @@ ridesRouter.post("/:id/status", async (req, res) => {
         await consumeCredit(updated.user_id, typeForCredit);
       } catch (err) {
         console.error("Error consuming credit for ride", rideId, err);
-        // Don't fail the status change just because credit accounting failed.
       }
     }
 
-    // 🔔 SMS notifications for key transitions
+    // SMS notifications for key transitions
     if (status === "driver_en_route" || status === "arrived") {
       try {
         await sendRideStatusNotification(
