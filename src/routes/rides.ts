@@ -1,11 +1,12 @@
 import express from "express";
 import { pool } from "../db/pool";
 import { consumeCredit } from "../services/credits";
+import { sendRideStatusNotification } from "../services/notifications";
 
 const ridesRouter = express.Router();
 
 // ----------------------
-// Helpers
+// Types & constants
 // ----------------------
 
 type RideStatus =
@@ -19,6 +20,10 @@ type RideStatus =
 
 const SLOT_WINDOW_MINUTES = 15;
 const MAX_RIDES_PER_SLOT = 4;
+
+// ----------------------
+// Helper functions
+// ----------------------
 
 /**
  * Compute slot window start & end for a given pickup_time.
@@ -74,7 +79,7 @@ function parseUserIdFromHeader(req: express.Request): number | null {
 // POST /rides  (create booking)
 // ----------------------
 //
-// Expected body (simplified):
+// Body:
 // {
 //   pickup_address: string,
 //   dropoff_address: string,
@@ -109,7 +114,8 @@ ridesRouter.post("/", async (req, res) => {
 
   if (!pickup_address || !dropoff_address || !pickup_time) {
     return res.status(400).json({
-      error: "Missing required fields: pickup_address, dropoff_address, pickup_time",
+      error:
+        "Missing required fields: pickup_address, dropoff_address, pickup_time",
     });
   }
 
@@ -185,6 +191,18 @@ ridesRouter.post("/", async (req, res) => {
 
     const ride = result.rows[0];
 
+    // 🔔 SMS: treat booking as "confirmed" in user-facing language
+    try {
+      await sendRideStatusNotification(
+        userId,
+        ride.id,
+        "confirmed",
+        ride.pickup_time
+      );
+    } catch (err) {
+      console.error("[Notifications] Failed to send booking SMS:", err);
+    }
+
     res.status(201).json({
       ok: true,
       ride,
@@ -248,7 +266,7 @@ ridesRouter.get("/user", async (req, res) => {
 // ----------------------
 //
 // Uses x-user-id header to identify driver (must have role = 'driver').
-// Returns today's rides (in UTC) for that driver, sorted by pickup_time.
+// For now, returns all non-cancelled rides for today (single-driver model).
 
 ridesRouter.get("/driver", async (req, res) => {
   const driverId = parseUserIdFromHeader(req);
@@ -257,12 +275,6 @@ ridesRouter.get("/driver", async (req, res) => {
   }
 
   try {
-    // We assume there's a driver_users mapping or that driver_id is a column on rides.
-    // For now, we keep it simple: rides table may have driver_id. If not, it's "single driver"
-    // and we just return all today's non-cancelled rides.
-    //
-    // If you DO have driver_id, uncomment the driver_id related parts.
-
     const now = new Date();
     const dayStart = new Date(
       Date.UTC(
@@ -325,8 +337,6 @@ ridesRouter.get("/driver", async (req, res) => {
 // ----------------------
 // GET /rides/admin   (simple list for admin page)
 // ----------------------
-//
-// Returns last 100 rides with user name.
 
 ridesRouter.get("/admin", async (_req, res) => {
   try {
@@ -407,7 +417,7 @@ ridesRouter.get("/:id", async (req, res) => {
 });
 
 // ----------------------
-// POST /rides/:id/status   (status updates + credits)
+// POST /rides/:id/status   (status updates + credits + SMS)
 // ----------------------
 
 ridesRouter.post("/:id/status", async (req, res) => {
@@ -433,10 +443,10 @@ ridesRouter.post("/:id/status", async (req, res) => {
   }
 
   try {
-    // Load current ride to know previous status, user & type
+    // Load current ride to know previous status, user & type & pickup_time
     const currentRes = await pool.query(
       `
-      SELECT id, user_id, status, ride_type
+      SELECT id, user_id, status, ride_type, pickup_time
       FROM rides
       WHERE id = $1
     `,
@@ -450,6 +460,7 @@ ridesRouter.post("/:id/status", async (req, res) => {
     const current = currentRes.rows[0];
     const prevStatus: RideStatus = current.status;
     const rideType: string = current.ride_type || "standard";
+    const pickupTimeIso: string | null = current.pickup_time || null;
 
     const updatedRes = await pool.query(
       `
@@ -477,6 +488,24 @@ ridesRouter.post("/:id/status", async (req, res) => {
       } catch (err) {
         console.error("Error consuming credit for ride", rideId, err);
         // Don't fail the status change just because credit accounting failed.
+      }
+    }
+
+    // 🔔 SMS notifications for key transitions
+    if (status === "driver_en_route" || status === "arrived") {
+      try {
+        await sendRideStatusNotification(
+          updated.user_id,
+          updated.id,
+          status,
+          pickupTimeIso
+        );
+      } catch (err) {
+        console.error(
+          "[Notifications] Failed to send status SMS for ride",
+          rideId,
+          err
+        );
       }
     }
 
