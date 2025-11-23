@@ -14,20 +14,40 @@ export async function initDb() {
         id SERIAL PRIMARY KEY,
         email TEXT,
         name TEXT,
-        role TEXT NOT NULL DEFAULT 'subscriber',
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         phone TEXT UNIQUE,
-        pin TEXT NOT NULL
+        pin TEXT,
+        role TEXT NOT NULL DEFAULT 'rider',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
     `);
 
     await client.query(`
-      ALTER TABLE users
-      ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'subscriber';
+      CREATE INDEX IF NOT EXISTS idx_users_phone
+      ON users(phone);
     `);
 
     //
-    // RIDES – core record of every ride
+    // SUBSCRIPTIONS – simple monthly periods for now
+    //
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS subscriptions (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        plan TEXT NOT NULL DEFAULT 'premium', -- 'basic' | 'premium' | 'ultimate'
+        period_start DATE NOT NULL,
+        period_end DATE NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_subscriptions_user_id
+      ON subscriptions(user_id);
+    `);
+
+    //
+    // RIDES – single-driver world, but driver_id is ready
     //
     await client.query(`
       CREATE TABLE IF NOT EXISTS rides (
@@ -39,13 +59,12 @@ export async function initDb() {
         pickup_lng DOUBLE PRECISION,
         drop_lat DOUBLE PRECISION,
         drop_lng DOUBLE PRECISION,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        pickup_time TIMESTAMPTZ,
-        arrival_target_time TIMESTAMPTZ,
+        pickup_time TIMESTAMPTZ NOT NULL,
         pickup_window_start TIMESTAMPTZ,
         pickup_window_end TIMESTAMPTZ,
         arrival_window_start TIMESTAMPTZ,
         arrival_window_end TIMESTAMPTZ,
+        arrival_target_time TIMESTAMPTZ,
         ride_type TEXT NOT NULL DEFAULT 'standard', -- 'standard' | 'grocery'
         status TEXT NOT NULL DEFAULT 'pending',
         driver_id INTEGER REFERENCES users(id),
@@ -63,6 +82,14 @@ export async function initDb() {
     `);
 
     // Extra safety: add missing columns for existing DBs
+    await client.query(`
+      ALTER TABLE rides
+      ADD COLUMN IF NOT EXISTS pickup_lat DOUBLE PRECISION;
+    `);
+    await client.query(`
+      ALTER TABLE rides
+      ADD COLUMN IF NOT EXISTS pickup_lng DOUBLE PRECISION;
+    `);
     await client.query(`
       ALTER TABLE rides
       ADD COLUMN IF NOT EXISTS drop_lat DOUBLE PRECISION;
@@ -97,7 +124,11 @@ export async function initDb() {
     `);
     await client.query(`
       ALTER TABLE rides
-      ADD COLUMN IF NOT EXISTS notes TEXT;
+      ADD COLUMN IF NOT EXISTS ride_type TEXT NOT NULL DEFAULT 'standard';
+    `);
+    await client.query(`
+      ALTER TABLE rides
+      ADD COLUMN IF NOT EXISTS driver_id INTEGER REFERENCES users(id);
     `);
     await client.query(`
       ALTER TABLE rides
@@ -127,6 +158,14 @@ export async function initDb() {
       ALTER TABLE rides
       ADD COLUMN IF NOT EXISTS compensation_applied BOOLEAN NOT NULL DEFAULT FALSE;
     `);
+    await client.query(`
+      ALTER TABLE rides
+      ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
+    `);
+    await client.query(`
+      ALTER TABLE rides
+      ADD COLUMN IF NOT EXISTS notes TEXT;
+    `);
 
     await client.query(`
       CREATE INDEX IF NOT EXISTS idx_rides_user_id
@@ -145,33 +184,42 @@ export async function initDb() {
         id SERIAL PRIMARY KEY,
         user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         month_start DATE NOT NULL,
+        month_end DATE NOT NULL,
         standard_total INTEGER NOT NULL DEFAULT 40,
         standard_used INTEGER NOT NULL DEFAULT 0,
         grocery_total INTEGER NOT NULL DEFAULT 4,
         grocery_used INTEGER NOT NULL DEFAULT 0,
-        UNIQUE (user_id, month_start)
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
     `);
 
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_ride_credits_user_month
+      ON ride_credits_monthly(user_id, month_start);
+    `);
+
     //
-    // WEEKLY SCHEDULE TEMPLATES – for future advanced engine
+    // SAVED LOCATIONS – home/work/school shortcuts
     //
     await client.query(`
-      CREATE TABLE IF NOT EXISTS weekly_schedule (
+      CREATE TABLE IF NOT EXISTS saved_locations (
         id SERIAL PRIMARY KEY,
         user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        day_of_week INTEGER NOT NULL, -- 0=Sunday ... 6=Saturday
-        arrival_start TIME NOT NULL,
-        arrival_end TIME NOT NULL,
-        pickup_address TEXT NOT NULL,
-        dropoff_address TEXT NOT NULL,
-        direction TEXT NOT NULL CHECK (direction IN ('to_work', 'to_home')),
-        active BOOLEAN NOT NULL DEFAULT TRUE
+        label TEXT NOT NULL, -- 'home' | 'work' | 'school' | future
+        address TEXT NOT NULL,
+        lat DOUBLE PRECISION,
+        lng DOUBLE PRECISION,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
     `);
 
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_saved_locations_user_id
+      ON saved_locations(user_id);
+    `);
+
     //
-    // USER SCHEDULES – used by /schedule API and frontend
+    // USER SCHEDULES – weekly patterns (Mon–Fri commute)
     //
     await client.query(`
       CREATE TABLE IF NOT EXISTS user_schedules (
@@ -200,6 +248,54 @@ export async function initDb() {
         message TEXT NOT NULL,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
+    `);
+
+    //
+    // REFERRALS & DISCOUNTS
+    //
+    await client.query(`
+      ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS referral_code TEXT UNIQUE;
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS referrals (
+        id SERIAL PRIMARY KEY,
+        referrer_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        referred_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        code TEXT NOT NULL,
+        reward_cents INTEGER NOT NULL DEFAULT 5000,
+        reward_applied BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE(referrer_user_id, referred_user_id)
+      );
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_referrals_referrer
+      ON referrals(referrer_user_id);
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_referrals_referred
+      ON referrals(referred_user_id);
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS user_discounts (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        label TEXT,
+        amount_cents INTEGER NOT NULL,
+        is_recurring BOOLEAN NOT NULL DEFAULT FALSE,
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_user_discounts_user_id
+      ON user_discounts(user_id);
     `);
 
     await client.query("COMMIT");
