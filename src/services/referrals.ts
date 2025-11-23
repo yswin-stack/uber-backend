@@ -15,10 +15,10 @@ export async function ensureReferralCodeForUser(userId: number): Promise<string>
     [userId]
   );
 
-  if (existing.rowCount === 0) {
+  if ((existing.rowCount ?? 0) === 0) {
     throw new Error("User not found");
   }
-
+  
   const current = existing.rows[0].referral_code as string | null;
   if (current && current.trim().length > 0) {
     return current;
