@@ -1,219 +1,194 @@
 import { Router, Request, Response } from "express";
 import { pool } from "../db/pool";
-import { normalizePhone } from "./auth";
-
 
 const adminRouter = Router();
 
 /**
- * Helper: get user id from x-user-id header (same pattern as other routes)
+ * Very simple check for admin.
+ * Final version will use JWT or role table entries.
  */
-function getUserIdFromHeader(req: Request): number | null {
-  const raw = req.header("x-user-id");
-  if (!raw) return null;
-  const n = parseInt(raw, 10);
-  if (Number.isNaN(n)) return null;
-  return n;
-}
-
-/**
- * Helper: ensure that the caller is an admin.
- * If not, sends response and returns null.
- */
-async function requireAdmin(
-  req: Request,
-  res: Response
-): Promise<{ id: number } | null> {
-  const userId = getUserIdFromHeader(req);
-  if (!userId) {
-    res.status(401).json({ error: "Missing or invalid x-user-id header." });
-    return null;
-  }
-
-  const result = await pool.query(
-    "SELECT id, role FROM users WHERE id = $1",
-    [userId]
-  );
-
-  if (result.rowCount === 0) {
-    res.status(404).json({ error: "Admin user not found." });
-    return null;
-  }
-
-  const row = result.rows[0];
-  if (row.role !== "admin") {
+function ensureAdmin(req: Request, res: Response): number | null {
+  const header = req.header("x-user-id");
+  const role = req.header("x-role"); // frontend already stores role
+  if (!header || role !== "admin") {
     res.status(403).json({ error: "Admin access required." });
     return null;
   }
-
-  return { id: row.id };
+  return parseInt(header, 10);
 }
 
 /**
- * GET /admin/users
- * Optional query: role=subscriber|driver|admin
- * Lists users for admin view.
+ * GET /admin/metrics/today
+ * - how many rides today
+ * - how many completed
+ * - how many cancelled
+ * - on-time %
  */
-adminRouter.get("/users", async (req: Request, res: Response) => {
+adminRouter.get("/metrics/today", async (req: Request, res: Response) => {
+  if (!ensureAdmin(req, res)) return;
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const tomorrow = new Date(today);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+
   try {
-    const admin = await requireAdmin(req, res);
-    if (!admin) return;
+    const totalRes = await pool.query(
+      `
+      SELECT COUNT(*) AS count
+      FROM rides
+      WHERE pickup_time >= $1
+        AND pickup_time < $2
+      `,
+      [today.toISOString(), tomorrow.toISOString()]
+    );
 
-    const role = (req.query.role as string | undefined)?.trim();
+    const completedRes = await pool.query(
+      `
+      SELECT COUNT(*) AS count
+      FROM rides
+      WHERE status = 'completed'
+        AND pickup_time >= $1
+        AND pickup_time < $2
+      `,
+      [today.toISOString(), tomorrow.toISOString()]
+    );
 
-    let query = `
-      SELECT id, phone, email, name, role, created_at
-      FROM users
-    `;
-    const params: any[] = [];
+    const cancelledRes = await pool.query(
+      `
+      SELECT COUNT(*) AS count
+      FROM rides
+      WHERE status IN ('cancelled','cancelled_by_user','cancelled_by_admin')
+        AND pickup_time >= $1 AND pickup_time < $2
+      `,
+      [today.toISOString(), tomorrow.toISOString()]
+    );
 
-    if (role && ["subscriber", "driver", "admin"].includes(role)) {
-      query += " WHERE role = $1";
-      params.push(role);
-    }
+    const lateRes = await pool.query(
+      `
+      SELECT COUNT(*) AS count
+      FROM rides
+      WHERE status='completed'
+        AND actual_arrival_time IS NOT NULL
+        AND arrival_window_end IS NOT NULL
+        AND actual_arrival_time > arrival_window_end
+        AND pickup_time >= $1 AND pickup_time < $2
+      `,
+      [today.toISOString(), tomorrow.toISOString()]
+    );
 
-    query += " ORDER BY created_at DESC";
+    const total = Number(totalRes.rows[0].count);
+    const completed = Number(completedRes.rows[0].count);
+    const cancelled = Number(cancelledRes.rows[0].count);
+    const late = Number(lateRes.rows[0].count);
 
-    const result = await pool.query(query, params);
+    const onTime = completed === 0 ? 100 : Math.max(0, 100 - (late / completed) * 100);
 
     return res.json({
-      ok: true,
-      users: result.rows,
+      total_rides: total,
+      completed,
+      cancelled,
+      late,
+      on_time_percent: onTime.toFixed(1)
     });
   } catch (err) {
-    console.error("Error in GET /admin/users:", err);
-    return res.status(500).json({ error: "Internal server error." });
+    console.error("Admin metrics today error:", err);
+    return res.status(500).json({ error: "Failed to load metrics." });
   }
 });
 
 /**
- * POST /admin/promote-driver
- * Body: { phone: string }
- * Finds a user by phone and sets role = 'driver'.
+ * GET /admin/metrics/this-month
  */
-adminRouter.post(
-  "/promote-driver",
-  async (req: Request, res: Response) => {
-    try {
-      const admin = await requireAdmin(req, res);
-      if (!admin) return;
+adminRouter.get("/metrics/this-month", async (req: Request, res: Response) => {
+  if (!ensureAdmin(req, res)) return;
 
-      const body = req.body as { phone?: string };
-      const rawPhone = body.phone?.trim();
-      if (!rawPhone) {
-        return res.status(400).json({ error: "phone is required." });
-      }
+  const now = new Date();
+  const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
 
-      const normalized = normalizePhone(rawPhone);
-
-      const findUser = await pool.query(
-        "SELECT id, phone, email, name, role FROM users WHERE phone = $1",
-        [normalized]
-      );
-
-      if (findUser.rowCount === 0) {
-        return res
-          .status(404)
-          .json({ error: "No user found with that phone." });
-      }
-
-      const user = findUser.rows[0];
-
-      if (user.role === "driver") {
-        // Already a driver; just return
-        return res.json({
-          ok: true,
-          message: "User is already a driver.",
-          user,
-        });
-      }
-
-      const updated = await pool.query(
-        `
-        UPDATE users
-        SET role = 'driver'
-        WHERE id = $1
-        RETURNING id, phone, email, name, role, created_at
-      `,
-        [user.id]
-      );
-
-      return res.json({
-        ok: true,
-        user: updated.rows[0],
-      });
-    } catch (err) {
-      console.error("Error in POST /admin/promote-driver:", err);
-      return res.status(500).json({ error: "Internal server error." });
-    }
-  }
-);
-
-/**
- * GET /admin/schedules
- * Optional query: userId=<id>
- * - If userId provided → schedule for that user
- * - Else → all schedules with user info
- */
-adminRouter.get("/schedules", async (req: Request, res: Response) => {
   try {
-    const admin = await requireAdmin(req, res);
-    if (!admin) return;
-
-    const userIdParam = (req.query.userId as string | undefined)?.trim();
-
-    if (userIdParam) {
-      const userId = parseInt(userIdParam, 10);
-      if (Number.isNaN(userId)) {
-        return res.status(400).json({ error: "Invalid userId." });
-      }
-
-      const result = await pool.query(
-        `
-        SELECT us.id,
-               us.user_id,
-               us.day_of_week,
-               us.direction,
-               us.arrival_time,
-               u.name,
-               u.phone
-        FROM user_schedules us
-        JOIN users u ON u.id = us.user_id
-        WHERE us.user_id = $1
-        ORDER BY us.day_of_week ASC, us.direction ASC, us.arrival_time ASC
-      `,
-        [userId]
-      );
-
-      return res.json({
-        ok: true,
-        schedules: result.rows,
-      });
-    } else {
-      const result = await pool.query(
-        `
-        SELECT us.id,
-               us.user_id,
-               us.day_of_week,
-               us.direction,
-               us.arrival_time,
-               u.name,
-               u.phone
-        FROM user_schedules us
-        JOIN users u ON u.id = us.user_id
-        ORDER BY us.day_of_week ASC, us.arrival_time ASC
+    const riderCount = await pool.query(
       `
-      );
+      SELECT COUNT(*) FROM subscriptions
+      WHERE current_period_start >= $1
+      `,
+      [monthStart.toISOString()]
+    );
 
-      return res.json({
-        ok: true,
-        schedules: result.rows,
-      });
-    }
+    const totalRides = await pool.query(
+      `
+      SELECT COUNT(*) FROM rides
+      WHERE created_at >= $1
+      `,
+      [monthStart.toISOString()]
+    );
+
+    const activeDrivers = await pool.query(`
+      SELECT COUNT(*) FROM users WHERE role='driver'
+    `);
+
+    return res.json({
+      active_subscribers: Number(riderCount.rows[0].count),
+      rides_created: Number(totalRides.rows[0].count),
+      drivers: Number(activeDrivers.rows[0].count),
+    });
   } catch (err) {
-    console.error("Error in GET /admin/schedules:", err);
-    return res.status(500).json({ error: "Internal server error." });
+    console.error("Admin metrics month error:", err);
+    return res.status(500).json({ error: "Failed to load monthly metrics." });
   }
 });
 
+/**
+ * GET /admin/schedule/today
+ * - This powers admin’s “Timeline View”
+ * - Same format as driver timeline but includes ALL rides and windows
+ */
+adminRouter.get("/schedule/today", async (req: Request, res: Response) => {
+  if (!ensureAdmin(req, res)) return;
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const tomorrow = new Date(today);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+
+  try {
+    const ridesRes = await pool.query(
+      `
+      SELECT *
+      FROM rides
+      WHERE pickup_time >= $1 AND pickup_time < $2
+      ORDER BY pickup_time ASC
+      `,
+      [today.toISOString(), tomorrow.toISOString()]
+    );
+
+    return res.json({
+      rides: ridesRes.rows
+    });
+  } catch (err) {
+    console.error("Admin schedule load error:", err);
+    return res.status(500).json({ error: "Failed to load schedule." });
+  }
+});
+
+/**
+ * GET /admin/ai/config
+ * - Exposes current AI tuning values (speed, snow penalties, etc.)
+ * - For now we return static values until Step 8/10 introduces DB config.
+ */
+adminRouter.get("/ai/config", async (req: Request, res: Response) => {
+  if (!ensureAdmin(req, res)) return;
+
+  return res.json({
+    travel_speed_kmh: 25,
+    winter_speed_kmh: 14,
+    snow_penalty_percent: 18,
+    pickup_window_size: 10,
+    arrival_window_size: 10,
+    max_rides_per_hour: 4,
+    overlap_buffer_minutes: 30
+  });
+});
+
+export { adminRouter };
 export default adminRouter;
