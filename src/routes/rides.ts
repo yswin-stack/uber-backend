@@ -2,6 +2,8 @@ import { Router, Request, Response } from "express";
 import { pool } from "../db/pool";
 import { computeDistanceKm } from "../utils/distance";
 import { sendRideStatusNotification } from "../services/notifications";
+import { getAiConfig } from "../services/aiConfig";
+import { estimateTravelMinutesKm } from "../services/predictiveEngine";
 
 const ridesRouter = Router();
 
@@ -9,9 +11,6 @@ const ridesRouter = Router();
 const CAMPUS_CENTER = { lat: 49.8075, lng: -97.1325 };
 const CORE_RADIUS_KM = 6; // normal rides
 const GROCERY_RADIUS_KM = 10; // grocery rides
-
-const MAX_RIDES_PER_HOUR = 4; // capacity rule
-const OVERLAP_BUFFER_MINUTES = 30; // ±30 min per user
 
 function getUserIdFromHeader(req: Request): number | null {
   const header = req.header("x-user-id");
@@ -24,25 +23,16 @@ function addMinutes(date: Date, minutes: number): Date {
   return new Date(date.getTime() + minutes * 60_000);
 }
 
-function diffMinutes(a: Date, b: Date): number {
-  return (a.getTime() - b.getTime()) / 60_000;
-}
-
-function getMonthStart(now: Date = new Date()): string {
-  const d = new Date(now);
-  d.setUTCDate(1);
-  d.setUTCHours(0, 0, 0, 0);
-  return d.toISOString().slice(0, 10); // YYYY-MM-DD
-}
-
 /**
  * GET /rides
- * Return all rides for the logged-in user.
+ *  - list rides for the logged-in user (recent history + upcoming)
  */
 ridesRouter.get("/", async (req: Request, res: Response) => {
   const userId = getUserIdFromHeader(req);
   if (!userId) {
-    return res.status(401).json({ error: "Missing or invalid x-user-id header." });
+    return res
+      .status(401)
+      .json({ error: "Missing or invalid x-user-id header." });
   }
 
   try {
@@ -51,7 +41,8 @@ ridesRouter.get("/", async (req: Request, res: Response) => {
       SELECT *
       FROM rides
       WHERE user_id = $1
-      ORDER BY pickup_time ASC NULLS LAST, created_at DESC
+      ORDER BY pickup_time DESC
+      LIMIT 50
       `,
       [userId]
     );
@@ -59,7 +50,7 @@ ridesRouter.get("/", async (req: Request, res: Response) => {
     return res.json({ rides: result.rows });
   } catch (err) {
     console.error("Error in GET /rides:", err);
-    return res.status(500).json({ error: "Failed to fetch rides" });
+    return res.status(500).json({ error: "Failed to list rides." });
   }
 });
 
@@ -69,7 +60,9 @@ ridesRouter.get("/", async (req: Request, res: Response) => {
 ridesRouter.get("/:id", async (req: Request, res: Response) => {
   const userId = getUserIdFromHeader(req);
   if (!userId) {
-    return res.status(401).json({ error: "Missing or invalid x-user-id header." });
+    return res
+      .status(401)
+      .json({ error: "Missing or invalid x-user-id header." });
   }
 
   const rideId = parseInt(req.params.id, 10);
@@ -100,52 +93,41 @@ ridesRouter.get("/:id", async (req: Request, res: Response) => {
 ridesRouter.post("/", async (req: Request, res: Response) => {
   const userId = getUserIdFromHeader(req);
   if (!userId) {
-    return res.status(401).json({ error: "Missing or invalid x-user-id header." });
+    return res
+      .status(401)
+      .json({ error: "Missing or invalid x-user-id header." });
   }
 
   const {
-    pickup_location,
-    dropoff_location,
     pickup_address,
-    dropoff_address,
     pickup_lat,
     pickup_lng,
+    dropoff_address,
     dropoff_lat,
     dropoff_lng,
-    arrive_by,
-    pickup_time, // legacy
-    ride_type,
     is_grocery,
+    arrive_by,
+    pickup_time, // fallback from older UI
     notes,
-  } = req.body || {};
+  } = req.body;
 
-  const pickupLabel: string | undefined = pickup_location || pickup_address;
-  const dropLabel: string | undefined = dropoff_location || dropoff_address;
+  const isGrocery = Boolean(is_grocery);
 
-  if (!pickupLabel || !dropLabel) {
-    return res
-      .status(400)
-      .json({ error: "Pickup and drop-off locations are required." });
-  }
-
+  //
+  // 1) Validate service zone
+  //
   if (
-    pickup_lat == null ||
-    pickup_lng == null ||
-    dropoff_lat == null ||
-    dropoff_lng == null
+    typeof pickup_lat !== "number" ||
+    typeof pickup_lng !== "number" ||
+    typeof dropoff_lat !== "number" ||
+    typeof dropoff_lng !== "number"
   ) {
     return res.status(400).json({
       error:
-        "Pickup and drop-off coordinates are required (please confirm both pins on the map).",
+        "Missing or invalid coordinates for pickup/drop-off. Coordinates are required.",
     });
   }
 
-  const isGrocery: boolean =
-    Boolean(is_grocery) || (typeof ride_type === "string" && ride_type === "grocery");
-
-  //
-  // 1) Service radius / zone check
-  //
   try {
     const pickupDistance = computeDistanceKm(
       CAMPUS_CENTER.lat,
@@ -169,7 +151,9 @@ ridesRouter.post("/", async (req: Request, res: Response) => {
     }
   } catch (err) {
     console.error("Distance check failed:", err);
-    return res.status(400).json({ error: "Invalid coordinates for distance check." });
+    return res
+      .status(400)
+      .json({ error: "Invalid coordinates for distance check." });
   }
 
   //
@@ -184,7 +168,7 @@ ridesRouter.post("/", async (req: Request, res: Response) => {
 
   const arriveBy = new Date(arriveRaw);
   if (Number.isNaN(arriveBy.getTime())) {
-    return res.status(400).json({ error: "Invalid arrive_by timestamp." });
+    return res.status(400).json({ error: "Invalid arrive_by time." });
   }
 
   const now = new Date();
@@ -195,7 +179,7 @@ ridesRouter.post("/", async (req: Request, res: Response) => {
   }
 
   //
-  // 3) Estimate travel time between pickup & dropoff
+  // 3) Estimate travel time between pickup & dropoff (AI-aware)
   //
   const legKm = computeDistanceKm(
     Number(pickup_lat),
@@ -204,16 +188,23 @@ ridesRouter.post("/", async (req: Request, res: Response) => {
     Number(dropoff_lng)
   );
 
-  // Simple baseline (later AI engine can adjust)
-  const SPEED_KMH = 25; // ~city driving
-  const baseMinutes = Math.max(6, (legKm / SPEED_KMH) * 60); // minimum 6 min
-  const travelMinutes = Math.ceil(baseMinutes);
+  // Load AI configuration & predictive travel estimate
+  const aiConfig = getAiConfig();
+  const travelEstimate = estimateTravelMinutesKm(legKm, { when: arriveBy });
+  const travelMinutes = travelEstimate.travel_minutes;
 
-  const ARRIVE_EARLY_MIN = 5;
-  const PICKUP_WINDOW_HALF_SPAN_MIN = 5; // ±5
-  const ARRIVAL_WINDOW_HALF_SPAN_MIN = 5;
+  const ARRIVE_EARLY_MIN = aiConfig.arrive_early_minutes;
+  const PICKUP_WINDOW_HALF_SPAN_MIN = Math.round(
+    aiConfig.pickup_window_size / 2
+  ); // minutes
+  const ARRIVAL_WINDOW_HALF_SPAN_MIN = Math.round(
+    aiConfig.arrival_window_size / 2
+  );
 
-  const pickupTimeObj = addMinutes(arriveBy, -(travelMinutes + ARRIVE_EARLY_MIN));
+  const pickupTimeObj = addMinutes(
+    arriveBy,
+    -(travelMinutes + ARRIVE_EARLY_MIN)
+  );
 
   const pickupWindowStart = addMinutes(
     pickupTimeObj,
@@ -227,15 +218,20 @@ ridesRouter.post("/", async (req: Request, res: Response) => {
     arriveBy,
     -ARRIVAL_WINDOW_HALF_SPAN_MIN
   );
-  const arrivalWindowEnd = addMinutes(arriveBy, ARRIVAL_WINDOW_HALF_SPAN_MIN);
+  const arrivalWindowEnd = addMinutes(
+    arriveBy,
+    ARRIVAL_WINDOW_HALF_SPAN_MIN
+  );
 
   //
-  // 4) Capacity rule: max 4 rides per hour
+  // 4) Capacity rule: max 4 rides per hour (configurable)
   //
   const hourStart = new Date(pickupTimeObj);
   hourStart.setMinutes(0, 0, 0);
   const hourEnd = new Date(hourStart);
   hourEnd.setHours(hourEnd.getHours() + 1);
+
+  const maxRidesPerHour = aiConfig.max_rides_per_hour || 4;
 
   try {
     const capResult = await pool.query(
@@ -250,7 +246,7 @@ ridesRouter.post("/", async (req: Request, res: Response) => {
     );
 
     const count = parseInt(capResult.rows[0]?.count ?? "0", 10);
-    if (count >= MAX_RIDES_PER_HOUR) {
+    if (count >= maxRidesPerHour) {
       return res.status(400).json({
         error:
           "That time window is fully booked. Please choose a slightly different time.",
@@ -258,14 +254,17 @@ ridesRouter.post("/", async (req: Request, res: Response) => {
     }
   } catch (err) {
     console.error("Capacity check error:", err);
-    return res.status(500).json({ error: "Failed to check schedule capacity." });
+    return res
+      .status(500)
+      .json({ error: "Failed to check schedule capacity." });
   }
 
   //
   // 5) Overlap rule: no rides within ±30 minutes for the same user
   //
-  const overlapStart = addMinutes(pickupTimeObj, -OVERLAP_BUFFER_MINUTES);
-  const overlapEnd = addMinutes(pickupTimeObj, OVERLAP_BUFFER_MINUTES);
+  const overlapBufferMinutes = aiConfig.overlap_buffer_minutes || 30;
+  const overlapStart = addMinutes(pickupTimeObj, -overlapBufferMinutes);
+  const overlapEnd = addMinutes(pickupTimeObj, overlapBufferMinutes);
 
   try {
     const overlapResult = await pool.query(
@@ -273,7 +272,6 @@ ridesRouter.post("/", async (req: Request, res: Response) => {
       SELECT 1
       FROM rides
       WHERE user_id = $1
-        AND pickup_time IS NOT NULL
         AND pickup_time >= $2
         AND pickup_time <= $3
         AND status NOT IN ('cancelled', 'cancelled_by_user', 'cancelled_by_admin', 'no_show')
@@ -285,20 +283,50 @@ ridesRouter.post("/", async (req: Request, res: Response) => {
     if (overlapResult.rowCount > 0) {
       return res.status(400).json({
         error:
-          "You already have a ride close to that time. Rides must be at least 30 minutes apart.",
+          "You already have a ride near that time. We avoid overlapping rides within ±30 minutes.",
       });
     }
   } catch (err) {
     console.error("Overlap check error:", err);
-    return res.status(500).json({ error: "Failed to check overlapping rides." });
+    return res
+      .status(500)
+      .json({ error: "Failed to check overlapping rides." });
   }
 
   //
-  // 6) Ensure monthly credits row & verify available credit
+  // 6) Validate & load subscription + credits
   //
-  const monthStart = getMonthStart(now);
+  const monthStart = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)
+  );
 
   try {
+    const subResult = await pool.query(
+      `
+      SELECT id, status
+      FROM subscriptions
+      WHERE user_id = $1
+        AND current_period_start <= $2
+        AND current_period_end > $2
+      `,
+      [userId, now.toISOString()]
+    );
+
+    if (subResult.rowCount === 0) {
+      return res.status(400).json({
+        error:
+          "No active subscription found. Please subscribe before booking rides.",
+      });
+    }
+
+    const subscription = subResult.rows[0];
+    if (subscription.status !== "active") {
+      return res.status(400).json({
+        error: "Your subscription is not active. Please contact support.",
+      });
+    }
+
+    // Ensure monthly credits row exists
     await pool.query(
       `
       INSERT INTO ride_credits_monthly (user_id, month_start)
@@ -329,18 +357,18 @@ ridesRouter.post("/", async (req: Request, res: Response) => {
       if (credits.standard_used >= credits.standard_total) {
         return res
           .status(400)
-          .json({ error: "No standard ride credits left this month." });
+          .json({ error: "You have no standard ride credits left this month." });
       }
     } else {
       if (credits.grocery_used >= credits.grocery_total) {
         return res
           .status(400)
-          .json({ error: "No grocery ride credits left this month." });
+          .json({ error: "You have no grocery ride credits left this month." });
       }
     }
 
     //
-    // 7) Insert the ride with computed windows
+    // 7) Insert ride
     //
     const insertResult = await pool.query(
       `
@@ -358,22 +386,25 @@ ridesRouter.post("/", async (req: Request, res: Response) => {
         pickup_window_end,
         arrival_window_start,
         arrival_window_end,
-        ride_type,
-        status,
+        type,
         notes
-      ) VALUES (
-        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'confirmed',$15
+      )
+      VALUES (
+        $1, $2, $3,
+        $4, $5, $6, $7,
+        $8, $9, $10, $11, $12, $13,
+        $14, $15
       )
       RETURNING *
       `,
       [
         userId,
-        pickupLabel,
-        dropLabel,
-        pickup_lat,
-        pickup_lng,
-        dropoff_lat,
-        dropoff_lng,
+        pickup_address,
+        dropoff_address,
+        Number(pickup_lat),
+        Number(pickup_lng),
+        Number(dropoff_lat),
+        Number(dropoff_lng),
         pickupTimeObj.toISOString(),
         arriveBy.toISOString(),
         pickupWindowStart.toISOString(),
@@ -411,7 +442,7 @@ ridesRouter.post("/", async (req: Request, res: Response) => {
     }
 
     //
-    // 9) Fire booking confirmation notification (non-blocking)
+    // 9) Optional: send confirmation SMS
     //
     try {
       await sendRideStatusNotification(
@@ -424,21 +455,29 @@ ridesRouter.post("/", async (req: Request, res: Response) => {
       console.warn("Failed to send booking confirmation SMS:", notifyErr);
     }
 
-    return res.status(201).json({ ride });
+    return res.status(201).json({
+      ride,
+      travel_minutes: travelMinutes,
+      pickup_window_start: pickupWindowStart.toISOString(),
+      pickup_window_end: pickupWindowEnd.toISOString(),
+      arrival_window_start: arrivalWindowStart.toISOString(),
+      arrival_window_end: arrivalWindowEnd.toISOString(),
+    });
   } catch (err) {
-    console.error("Error creating ride:", err);
+    console.error("Error in POST /rides:", err);
     return res.status(500).json({ error: "Failed to create ride." });
   }
 });
 
 /**
  * POST /rides/:id/cancel
- * Rider cancels; must be ≥15 minutes before pickup_time.
  */
 ridesRouter.post("/:id/cancel", async (req: Request, res: Response) => {
   const userId = getUserIdFromHeader(req);
   if (!userId) {
-    return res.status(401).json({ error: "Missing or invalid x-user-id header." });
+    return res
+      .status(401)
+      .json({ error: "Missing or invalid x-user-id header." });
   }
 
   const rideId = parseInt(req.params.id, 10);
@@ -447,42 +486,37 @@ ridesRouter.post("/:id/cancel", async (req: Request, res: Response) => {
   }
 
   try {
-    const result = await pool.query(
+    const rideResult = await pool.query(
       `
-      SELECT id, pickup_time, status
+      SELECT *
       FROM rides
       WHERE id = $1 AND user_id = $2
       `,
       [rideId, userId]
     );
 
-    if (result.rowCount === 0) {
+    if (rideResult.rowCount === 0) {
       return res.status(404).json({ error: "Ride not found." });
     }
 
-    const ride = result.rows[0];
+    const ride = rideResult.rows[0] as {
+      status: string;
+      pickup_time: string | null;
+    };
 
-    if (!ride.pickup_time) {
-      return res
-        .status(400)
-        .json({ error: "Ride does not yet have a pickup time set." });
+    if (
+      ride.status === "cancelled" ||
+      ride.status === "cancelled_by_user" ||
+      ride.status === "cancelled_by_admin"
+    ) {
+      return res.status(400).json({ error: "Ride is already cancelled." });
     }
 
-    const now = new Date();
-    const pickupTime = new Date(ride.pickup_time);
-    const minutesUntilPickup = diffMinutes(pickupTime, now);
-
-    if (minutesUntilPickup < 15) {
-      return res.status(400).json({
-        error: "Rides can only be cancelled up to 15 minutes before pickup.",
-      });
-    }
-
+    // TODO: enforce "cancel up to 15 min before pickup" rule
     await pool.query(
       `
       UPDATE rides
-      SET status = 'cancelled_by_user',
-          cancelled_at = NOW()
+      SET status = 'cancelled_by_user', cancelled_at = NOW()
       WHERE id = $1
       `,
       [rideId]
