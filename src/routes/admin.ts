@@ -1,6 +1,8 @@
 import { Router, Request, Response } from "express";
 import { pool } from "../db/pool";
 import { getAiConfig } from "../services/aiConfig";
+import { runPredictiveLoadBalancer } from "../services/loadBalancer";
+
 
 const adminRouter = Router();
 
