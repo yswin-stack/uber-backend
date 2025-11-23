@@ -3,7 +3,7 @@ import { pool } from "../db/pool";
 
 const authRouter = express.Router();
 
-// your super-admin phone
+// Your super-admin phone (normalized)
 const ADMIN_PHONE = "+14313389073";
 
 /**
@@ -66,10 +66,21 @@ authRouter.post("/login", async (req, res) => {
       return res.status(401).json({ error: "Invalid phone or PIN." });
     }
 
-    // force admin role for your special phone
+    // Compute normalized DB phone too
+    const dbPhoneNormalized = normalizePhone(user.phone || "");
+
     let role: string = user.role || "rider";
-    if (user.phone === ADMIN_PHONE) {
+    if (dbPhoneNormalized === ADMIN_PHONE) {
       role = "admin";
+
+      // Make sure DB role is also updated so admin API checks work
+      try {
+        await pool.query(`UPDATE users SET role = 'admin' WHERE id = $1`, [
+          user.id,
+        ]);
+      } catch (err) {
+        console.error("Failed to update user role to admin:", err);
+      }
     }
 
     const safeUser = {
