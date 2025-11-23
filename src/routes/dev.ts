@@ -56,7 +56,7 @@ devRouter.post("/create-test-user", async (req: Request, res: Response) => {
  * POST /dev/init-schedule-table
  * One-time helper to create the user_schedules table if it doesn't exist.
  */
-devRouter.post(
+devRouter.get(
   "/init-schedule-table",
   async (req: Request, res: Response) => {
     try {
