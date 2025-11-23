@@ -11,6 +11,7 @@ const authRouter = express.Router();
  * - Else fallback to trimmed string
  */
 function normalizePhone(input: string): string {
+  export { normalizePhone };
   const trimmed = input.trim();
   const digits = trimmed.replace(/\D/g, "");
 
