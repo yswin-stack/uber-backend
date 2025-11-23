@@ -5,12 +5,16 @@ import { Server } from "socket.io";
 import dotenv from "dotenv";
 
 import authRouter from "./routes/auth";
-import { ridesRouter } from "./routes/rides";
+import ridesRouter from "./routes/rides";
 import scheduleRouter from "./routes/schedule";
 import adminRouter from "./routes/admin";
 import { creditsRouter } from "./routes/credits";
 import devRouter from "./routes/dev";
+import slotsRouter from "./routes/slots";
+import userRouter from "./routes/user";
+import driverRouter from "./routes/driver";
 import { initDb } from "./db/init";
+import { setupTrackingSockets } from "./sockets/tracking";
 
 dotenv.config();
 
@@ -20,14 +24,18 @@ const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
     origin: "*",
-    methods: ["GET", "POST"],
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   },
 });
 
-const PORT = process.env.PORT || 10000;
+setupTrackingSockets(io);
 
-// --- Middleware ---
-app.use(cors({ origin: "*" }));
+app.use(
+  cors({
+    origin: "*",
+  })
+);
+
 app.use(express.json());
 
 // --- Health check ---
@@ -36,47 +44,26 @@ app.get("/", (_req, res) => {
 });
 
 // --- Routers mounted here ---
-// These paths MUST match what frontend uses:
 //  - /auth/...
 //  - /rides/...
 //  - /schedule/...
 //  - /admin/...
 //  - /credits/...
 //  - /dev/...
+//  - /slots/...
+//  - /user/...
+//  - /driver/...
 app.use("/auth", authRouter);
 app.use("/rides", ridesRouter);
 app.use("/schedule", scheduleRouter);
 app.use("/admin", adminRouter);
 app.use("/credits", creditsRouter);
 app.use("/dev", devRouter);
+app.use("/slots", slotsRouter);
+app.use("/user", userRouter);
+app.use("/driver", driverRouter);
 
-// --- Socket.IO for live driver tracking ---
-io.on("connection", (socket) => {
-  console.log("Client connected:", socket.id);
-
-  // Rider joins a ride room
-  socket.on("join_ride", (rideId: number) => {
-    if (!rideId) return;
-    const room = `ride_${rideId}`;
-    socket.join(room);
-    console.log(`Socket ${socket.id} joined room ${room}`);
-  });
-
-  // Driver sends location updates
-  socket.on(
-    "driver_location_update",
-    (payload: { rideId?: number; lat?: number; lng?: number }) => {
-      const { rideId, lat, lng } = payload || {};
-      if (!rideId || lat == null || lng == null) return;
-      const room = `ride_${rideId}`;
-      io.to(room).emit("driver_location_update", { lat, lng });
-    }
-  );
-
-  socket.on("disconnect", () => {
-    console.log("Client disconnected:", socket.id);
-  });
-});
+const PORT = process.env.PORT || 10000;
 
 // --- Start server with DB init ---
 async function start() {
