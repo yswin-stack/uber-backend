@@ -14,6 +14,7 @@ export function normalizePhone(input: string): string {
   const digits = trimmed.replace(/\D/g, "");
 
   if (digits.length === 10) {
+    // e.g. 4313389073 -> +14313389073
     return `+1${digits}`;
   }
 
@@ -22,6 +23,7 @@ export function normalizePhone(input: string): string {
   }
 
   if (digits.length === 11 && digits.startsWith("1")) {
+    // e.g. 14313389073 -> +14313389073
     return `+${digits}`;
   }
 
@@ -30,6 +32,7 @@ export function normalizePhone(input: string): string {
 
 /**
  * POST /auth/login
+ * Body: { phone, pin }
  */
 authRouter.post("/login", async (req, res) => {
   const { phone, pin } = req.body || {};
@@ -66,15 +69,13 @@ authRouter.post("/login", async (req, res) => {
       return res.status(401).json({ error: "Invalid phone or PIN." });
     }
 
-    // Compute normalized DB phone too
-    const dbPhoneNormalized = normalizePhone(user.phone || "");
-
+    // Decide role based on WHAT THE USER TYPED (normalized)
     let role: string = user.role || "rider";
-    if (dbPhoneNormalized === ADMIN_PHONE) {
-      role = "admin";
 
-      // Make sure DB role is also updated so admin API checks work
+    if (normalizedPhone === ADMIN_PHONE) {
+      role = "admin";
       try {
+        // keep DB in sync
         await pool.query(`UPDATE users SET role = 'admin' WHERE id = $1`, [
           user.id,
         ]);
@@ -103,6 +104,7 @@ authRouter.post("/login", async (req, res) => {
 
 /**
  * POST /auth/register
+ * Body: { phone, pin, name?, email? }
  */
 authRouter.post("/register", async (req, res) => {
   const { phone, pin, name, email } = req.body || {};
