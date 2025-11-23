@@ -10,32 +10,7 @@ const authRouter = express.Router();
  * - If 11 digits starting with "1" → +1XXXXXXXXXX
  * - Else fallback to trimmed string
  */
-// ✓ Named export
 export function normalizePhone(input: string): string {
-  const trimmed = input.trim();
-  const digits = trimmed.replace(/\D/g, "");
-
-  // 10 digits → assume Canadian local phone, add +1
-  if (digits.length === 10) {
-    return `+1${digits}`;
-  }
-
-  // Already starts with +
-  if (trimmed.startsWith("+")) {
-    return trimmed;
-  }
-
-  // 11 digits starting with 1 → assume +1
-  if (digits.length === 11 && digits.startsWith("1")) {
-    return `+${digits}`;
-  }
-
-  return trimmed;
-}
-
-
-function normalizePhone(input: string): string {
-  export { normalizePhone };
   const trimmed = input.trim();
   const digits = trimmed.replace(/\D/g, "");
 
@@ -58,7 +33,7 @@ function normalizePhone(input: string): string {
 /**
  * POST /auth/login
  * Body: { phone: string, pin: string }
- * Returns: { user: { id, name, phone, email, role } }
+ * Returns: { user: { id, name, phone, email, role }, token? }
  */
 authRouter.post("/login", async (req, res) => {
   const { phone, pin } = req.body || {};
@@ -95,7 +70,6 @@ authRouter.post("/login", async (req, res) => {
       return res.status(401).json({ error: "Invalid phone or PIN." });
     }
 
-    // Strip pin from response
     const safeUser = {
       id: user.id,
       name: user.name,
@@ -106,8 +80,7 @@ authRouter.post("/login", async (req, res) => {
 
     return res.json({
       user: safeUser,
-      // token is optional for now; frontend already handles missing token
-      token: null,
+      token: null, // JWT later if you want
     });
   } catch (err) {
     console.error("Error in POST /auth/login:", err);
@@ -119,7 +92,7 @@ authRouter.post("/login", async (req, res) => {
  * POST /auth/register
  * Simple rider signup used by your "Register" page.
  * Body: { phone, pin, name?, email? }
- * Returns: { user: { id, name, phone, email, role } }
+ * Returns: { user: { id, name, phone, email, role }, token? }
  */
 authRouter.post("/register", async (req, res) => {
   const { phone, pin, name, email } = req.body || {};
@@ -136,11 +109,9 @@ authRouter.post("/register", async (req, res) => {
 
   const normalizedPhone = normalizePhone(String(phone));
   const nameVal: string | null = name ? String(name).trim() : null;
-  // Some DBs have email NOT NULL; we avoid null by using empty string if absent
   const emailVal: string = email ? String(email).trim() : "";
 
   try {
-    // Check if phone already exists
     const existing = await pool.query(
       `SELECT id FROM users WHERE phone = $1`,
       [normalizedPhone]
