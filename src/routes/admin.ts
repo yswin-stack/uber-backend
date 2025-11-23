@@ -2,7 +2,10 @@ import { Router, Request, Response } from "express";
 import { pool } from "../db/pool";
 import { getAiConfig } from "../services/aiConfig";
 import { runPredictiveLoadBalancer } from "../services/loadBalancer";
-
+import {
+  listReferralsForAdmin,
+  markReferralRewardApplied,
+} from "../services/referrals";
 
 const adminRouter = Router();
 
@@ -13,125 +16,201 @@ const adminRouter = Router();
 function ensureAdmin(req: Request, res: Response): number | null {
   const header = req.header("x-user-id");
   const role = req.header("x-role"); // frontend already stores role
-  if (!header || role !== "admin") {
+
+  if (!header || !role) {
+    res.status(401).json({ error: "Missing admin headers." });
+    return null;
+  }
+
+  if (role !== "admin") {
     res.status(403).json({ error: "Admin access required." });
     return null;
   }
-  return parseInt(header, 10);
+
+  const id = parseInt(header, 10);
+  if (Number.isNaN(id)) {
+    res.status(401).json({ error: "Invalid x-user-id header." });
+    return null;
+  }
+
+  return id;
 }
 
 /**
- * GET /admin/metrics/today
- * - how many rides today
- * - how many completed
- * - how many cancelled
- * - on-time %
+ * GET /admin/users
+ * - List all users with basic info for admin view
  */
-adminRouter.get("/metrics/today", async (req: Request, res: Response) => {
+adminRouter.get("/users", async (req: Request, res: Response) => {
   if (!ensureAdmin(req, res)) return;
 
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const tomorrow = new Date(today);
-  tomorrow.setDate(tomorrow.getDate() + 1);
-
   try {
-    const totalRes = await pool.query(
+    const usersRes = await pool.query(
       `
-      SELECT COUNT(*) AS count
-      FROM rides
-      WHERE pickup_time >= $1
-        AND pickup_time < $2
-      `,
-      [today.toISOString(), tomorrow.toISOString()]
+      SELECT
+        id,
+        name,
+        email,
+        phone,
+        role,
+        created_at
+      FROM users
+      ORDER BY created_at DESC
+      `
     );
 
-    const completedRes = await pool.query(
-      `
-      SELECT COUNT(*) AS count
-      FROM rides
-      WHERE status = 'completed'
-        AND pickup_time >= $1
-        AND pickup_time < $2
-      `,
-      [today.toISOString(), tomorrow.toISOString()]
-    );
-
-    const cancelledRes = await pool.query(
-      `
-      SELECT COUNT(*) AS count
-      FROM rides
-      WHERE status IN ('cancelled','cancelled_by_user','cancelled_by_admin')
-        AND pickup_time >= $1 AND pickup_time < $2
-      `,
-      [today.toISOString(), tomorrow.toISOString()]
-    );
-
-    const lateRes = await pool.query(
-      `
-      SELECT COUNT(*) AS count
-      FROM rides
-      WHERE status='completed'
-        AND actual_arrival_time IS NOT NULL
-        AND arrival_window_end IS NOT NULL
-        AND actual_arrival_time > arrival_window_end
-        AND pickup_time >= $1 AND pickup_time < $2
-      `,
-      [today.toISOString(), tomorrow.toISOString()]
-    );
-
-    const total = Number(totalRes.rows[0].count);
-    const completed = Number(completedRes.rows[0].count);
-    const cancelled = Number(cancelledRes.rows[0].count);
-    const late = Number(lateRes.rows[0].count);
-
-    const onTime =
-      completed === 0 ? 100 : Math.max(0, 100 - (late / completed) * 100);
-
-    return res.json({
-      total_rides: total,
-      completed,
-      cancelled,
-      late,
-      on_time_percent: onTime.toFixed(1),
-    });
+    return res.json({ users: usersRes.rows });
   } catch (err) {
-    console.error("Admin metrics today error:", err);
-    return res.status(500).json({ error: "Failed to load metrics." });
+    console.error("Admin users error:", err);
+    return res.status(500).json({ error: "Failed to load users." });
   }
 });
 
 /**
- * GET /admin/metrics/this-month
+ * POST /admin/promote-driver
+ * - Promote an existing user (by phone) to driver role.
  */
-adminRouter.get("/metrics/this-month", async (req: Request, res: Response) => {
+adminRouter.post(
+  "/promote-driver",
+  async (req: Request, res: Response) => {
+    const adminId = ensureAdmin(req, res);
+    if (!adminId) return;
+
+    try {
+      const { phone } = req.body || {};
+      if (!phone) {
+        return res.status(400).json({ error: "phone is required." });
+      }
+
+      const userRes = await pool.query(
+        `
+        SELECT id, name, email, phone, role
+        FROM users
+        WHERE phone = $1
+        `,
+        [phone]
+      );
+
+      if (userRes.rowCount === 0) {
+        return res.status(404).json({ error: "User not found." });
+      }
+
+      const user = userRes.rows[0];
+
+      if (user.role === "driver") {
+        return res.json({
+          ok: true,
+          user,
+          message: "User is already a driver.",
+        });
+      }
+
+      const updated = await pool.query(
+        `
+        UPDATE users
+        SET role = 'driver'
+        WHERE id = $1
+        RETURNING id, name, email, phone, role
+        `,
+        [user.id]
+      );
+
+      return res.json({
+        ok: true,
+        user: updated.rows[0],
+      });
+    } catch (err) {
+      console.error("Admin promote-driver error:", err);
+      return res.status(500).json({ error: "Failed to promote user." });
+    }
+  }
+);
+
+/**
+ * GET /admin/schedules
+ * - For a given userId (optional), list weekly schedule entries.
+ */
+adminRouter.get("/schedules", async (req: Request, res: Response) => {
   if (!ensureAdmin(req, res)) return;
 
-  const now = new Date();
-  const monthStart = new Date(
-    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)
-  );
+  try {
+    const userIdParam = req.query.userId;
+    let sql = `
+      SELECT
+        s.id,
+        s.user_id,
+        s.day_of_week,
+        s.direction,
+        s.arrival_time,
+        u.name,
+        u.phone
+      FROM user_schedules s
+      JOIN users u ON u.id = s.user_id
+    `;
+    const params: any[] = [];
+
+    if (userIdParam) {
+      sql += " WHERE s.user_id = $1";
+      params.push(parseInt(String(userIdParam), 10));
+    }
+
+    sql += " ORDER BY s.user_id, s.day_of_week, s.arrival_time";
+
+    const schedulesRes = await pool.query(sql, params);
+    return res.json({ schedules: schedulesRes.rows });
+  } catch (err) {
+    console.error("Admin schedules error:", err);
+    return res.status(500).json({ error: "Failed to load schedules." });
+  }
+});
+
+/**
+ * GET /admin/metrics/month
+ * - Simple monthly subscription / rides stats for dashboard.
+ */
+adminRouter.get("/metrics/month", async (req: Request, res: Response) => {
+  if (!ensureAdmin(req, res)) return;
 
   try {
+    const now = new Date();
+    const start = new Date(now.getFullYear(), now.getMonth(), 1);
+    const end = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+
+    const subs = await pool.query(
+      `
+      SELECT COUNT(*) AS active
+      FROM subscriptions
+      WHERE period_start >= $1
+        AND period_start < $2
+        AND status = 'active'
+      `,
+      [start, end]
+    );
+
     const riderCount = await pool.query(
       `
-      SELECT COUNT(*) FROM subscriptions
-      WHERE current_period_start >= $1
-      `,
-      [monthStart.toISOString()]
+      SELECT COUNT(*) AS cnt
+      FROM users
+      WHERE role = 'rider'
+      `
     );
 
     const totalRides = await pool.query(
       `
-      SELECT COUNT(*) FROM rides
-      WHERE created_at >= $1
+      SELECT COUNT(*) AS cnt
+      FROM rides
+      WHERE pickup_time >= $1
+        AND pickup_time < $2
       `,
-      [monthStart.toISOString()]
+      [start, end]
     );
 
-    const activeDrivers = await pool.query(`
-      SELECT COUNT(*) FROM users WHERE role='driver'
-    `);
+    const activeDrivers = await pool.query(
+      `
+      SELECT COUNT(*) AS cnt
+      FROM users
+      WHERE role = 'driver'
+      `
+    );
 
     return res.json({
       active_subscribers: Number(riderCount.rows[0].count),
@@ -141,38 +220,6 @@ adminRouter.get("/metrics/this-month", async (req: Request, res: Response) => {
   } catch (err) {
     console.error("Admin metrics month error:", err);
     return res.status(500).json({ error: "Failed to load monthly metrics." });
-  }
-});
-
-/**
- * GET /admin/schedule/today
- * - Admin timeline view
- */
-adminRouter.get("/schedule/today", async (req: Request, res: Response) => {
-  if (!ensureAdmin(req, res)) return;
-
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const tomorrow = new Date(today);
-  tomorrow.setDate(tomorrow.getDate() + 1);
-
-  try {
-    const ridesRes = await pool.query(
-      `
-      SELECT *
-      FROM rides
-      WHERE pickup_time >= $1 AND pickup_time < $2
-      ORDER BY pickup_time ASC
-      `,
-      [today.toISOString(), tomorrow.toISOString()]
-    );
-
-    return res.json({
-      rides: ridesRes.rows,
-    });
-  } catch (err) {
-    console.error("Admin schedule load error:", err);
-    return res.status(500).json({ error: "Failed to load schedule." });
   }
 });
 
@@ -323,6 +370,48 @@ adminRouter.get(
   }
 );
 
+/**
+ * GET /admin/referrals
+ * - List recent referral activity.
+ */
+adminRouter.get("/referrals", async (req: Request, res: Response) => {
+  if (!ensureAdmin(req, res)) return;
+
+  try {
+    const list = await listReferralsForAdmin(200);
+    return res.json({ referrals: list });
+  } catch (err) {
+    console.error("Error in GET /admin/referrals:", err);
+    return res.status(500).json({ error: "Failed to load referrals." });
+  }
+});
+
+/**
+ * POST /admin/referrals/:id/apply
+ * - Mark a referral reward as applied (e.g. discount given).
+ */
+adminRouter.post(
+  "/referrals/:id/apply",
+  async (req: Request, res: Response) => {
+    if (!ensureAdmin(req, res)) return;
+
+    const idRaw = req.params.id;
+    const referralId = parseInt(idRaw, 10);
+    if (Number.isNaN(referralId)) {
+      return res.status(400).json({ error: "Invalid referral id." });
+    }
+
+    try {
+      await markReferralRewardApplied(referralId);
+      return res.json({ ok: true });
+    } catch (err) {
+      console.error("Error in POST /admin/referrals/:id/apply:", err);
+      return res
+        .status(500)
+        .json({ error: "Failed to mark referral reward as applied." });
+    }
+  }
+);
+
 export { adminRouter };
 export default adminRouter;
-
