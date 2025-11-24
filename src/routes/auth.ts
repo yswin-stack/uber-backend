@@ -1,5 +1,8 @@
 import express from "express";
 import { pool } from "../db/pool";
+import { ok, fail } from "../lib/apiResponse";
+
+
 
 const authRouter = express.Router();
 
