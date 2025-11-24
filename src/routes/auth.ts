@@ -107,8 +107,17 @@ authRouter.post("/login", async (req, res) => {
  * POST /auth/register
  * Body: { phone, pin, name?, email? }
  */
-  const normalizedPhone = normalizePhone(String(phone));
-  const nameVal: string | null = name ? String(name).trim() : null;
+ const nameVal: string | null = name ? String(name).trim() : null;
+
+// Email must be unique + not null due to DB schema.
+// If user didn’t provide an email, generate a unique placeholder.
+let emailVal: string = email ? String(email).trim() : "";
+
+if (!emailVal) {
+  const safePhone = normalizedPhone.replace(/[^0-9+]/g, "");
+  emailVal = `${safePhone}@placeholder.local`;
+}
+
 
   // Email must satisfy UNIQUE NOT NULL in many DB setups.
   // If user didn't give one, synthesize a unique placeholder based on phone.
