@@ -26,6 +26,7 @@ function addMinutes(date: Date, minutes: number): Date {
 }
 
 /**
+/**
  * GET /rides
  *  - list rides for the logged-in user (recent history + upcoming)
  */
@@ -34,7 +35,7 @@ ridesRouter.get("/", async (req: Request, res: Response) => {
   if (!userId) {
     return res
       .status(401)
-      .json({ error: "Missing or invalid x-user-id header." });
+      .json(fail("AUTH_REQUIRED", "Please log in to view your rides."));
   }
 
   try {
@@ -49,12 +50,16 @@ ridesRouter.get("/", async (req: Request, res: Response) => {
       [userId]
     );
 
-    return res.json({ rides: result.rows });
+    // Standard success shape: { ok: true, data: Ride[] }
+    return res.json(ok(result.rows));
   } catch (err) {
     console.error("Error in GET /rides:", err);
-    return res.status(500).json({ error: "Failed to list rides." });
+    return res
+      .status(500)
+      .json(fail("RIDES_LIST_FAILED", "Failed to list rides."));
   }
 });
+
 
 /**
  * GET /rides/:id
