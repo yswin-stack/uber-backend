@@ -6,6 +6,9 @@ import { getAiConfig } from "../services/aiConfig";
 import { estimateTravelMinutesKm } from "../services/predictiveEngine";
 import { ok, fail } from "../lib/apiResponse";
 import { requireAuth } from "../middleware/auth";
+import { isInPeakWindow } from "../lib/peak";
+import { getActiveSubscription } from "../services/subscriptionService";
+
 
 const ridesRouter = Router();
 
