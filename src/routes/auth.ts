@@ -107,23 +107,28 @@ authRouter.post("/login", async (req, res) => {
  * POST /auth/register
  * Body: { phone, pin, name?, email? }
  */
- const nameVal: string | null = name ? String(name).trim() : null;
+authRouter.post("/register", async (req, res) => {
+  const { phone, pin, name, email } = req.body || {};
 
-// Email must be unique + not null due to DB schema.
-// If user didn’t provide an email, generate a unique placeholder.
-let emailVal: string = email ? String(email).trim() : "";
+  if (!phone || !pin) {
+    return res
+      .status(400)
+      .json({ error: "Phone and 4-digit PIN are required." });
+  }
 
-if (!emailVal) {
-  const safePhone = normalizedPhone.replace(/[^0-9+]/g, "");
-  emailVal = `${safePhone}@placeholder.local`;
-}
+  if (typeof pin !== "string" || !/^\d{4}$/.test(pin)) {
+    return res.status(400).json({ error: "PIN must be 4 digits." });
+  }
 
+  const normalizedPhone = normalizePhone(String(phone));
+  const nameVal: string | null = name ? String(name).trim() : null;
 
-  // Email must satisfy UNIQUE NOT NULL in many DB setups.
-  // If user didn't give one, synthesize a unique placeholder based on phone.
+  // Email must be unique and not null in many DB schemas.
+  // If user didn't provide one, generate a unique placeholder from phone.
   let emailVal: string = email ? String(email).trim() : "";
   if (!emailVal) {
-    emailVal = `${normalizedPhone.replace(/[^0-9+]/g, "")}@placeholder.local`;
+    const safePhone = normalizedPhone.replace(/[^0-9+]/g, "");
+    emailVal = `${safePhone}@placeholder.local`;
   }
 
   try {
@@ -145,7 +150,6 @@ if (!emailVal) {
       [normalizedPhone, pin, nameVal, emailVal]
     );
 
-
     const user = insert.rows[0];
 
     return res.status(201).json({
@@ -157,5 +161,6 @@ if (!emailVal) {
     return res.status(500).json({ error: "Internal server error" });
   }
 });
+
 
 export default authRouter;
