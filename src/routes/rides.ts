@@ -5,7 +5,7 @@ import { sendRideStatusNotification } from "../services/notifications";
 import { getAiConfig } from "../services/aiConfig";
 import { estimateTravelMinutesKm } from "../services/predictiveEngine";
 import { ok, fail } from "../lib/apiResponse";
-
+import { requireAuth } from "../middleware/auth";
 
 const ridesRouter = Router();
 
