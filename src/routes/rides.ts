@@ -35,7 +35,6 @@ function addMinutes(date: Date, minutes: number): Date {
 ridesRouter.get("/", requireAuth, async (req: Request, res: Response) => {
   const authUser = req.user;
   if (!authUser) {
-    // should not happen because requireAuth already checks, but for safety:
     return res
       .status(401)
       .json(fail("AUTH_REQUIRED", "Please log in to view your rides."));
@@ -205,7 +204,6 @@ ridesRouter.post("/", requireAuth, async (req: Request, res: Response) => {
     Number(dropoff_lng)
   );
 
-  // Load AI configuration & predictive travel estimate
   const aiConfig = getAiConfig();
   const travelEstimate = estimateTravelMinutesKm(legKm, { when: arriveBy });
   const travelMinutes = travelEstimate.travel_minutes;
@@ -213,7 +211,7 @@ ridesRouter.post("/", requireAuth, async (req: Request, res: Response) => {
   const ARRIVE_EARLY_MIN = aiConfig.arrive_early_minutes;
   const PICKUP_WINDOW_HALF_SPAN_MIN = Math.round(
     aiConfig.pickup_window_size / 2
-  ); // minutes
+  );
   const ARRIVAL_WINDOW_HALF_SPAN_MIN = Math.round(
     aiConfig.arrival_window_size / 2
   );
@@ -265,7 +263,7 @@ ridesRouter.post("/", requireAuth, async (req: Request, res: Response) => {
   }
 
   //
-  // 4) Capacity rule: max 4 rides per hour (configurable)
+  // 4) Capacity rule: max X rides per hour (from AI config, default 4)
   //
   const hourStart = new Date(pickupTimeObj);
   hourStart.setMinutes(0, 0, 0);
@@ -460,7 +458,7 @@ ridesRouter.post("/", requireAuth, async (req: Request, res: Response) => {
     const ride = insertResult.rows[0];
 
     //
-    // 8) Deduct the appropriate credit
+    // 8) Deduct the appropriate credit (simple: deduct on creation)
     //
     if (!isGrocery) {
       await pool.query(
@@ -496,7 +494,7 @@ ridesRouter.post("/", requireAuth, async (req: Request, res: Response) => {
       console.warn("Failed to send booking confirmation SMS:", notifyErr);
     }
 
-    // ✅ Keep response shape identical to V1 so frontend continues to work
+    // Keep response shape identical to V1 so frontend continues to work
     return res.status(201).json({
       ride,
       travel_minutes: travelMinutes,
@@ -513,6 +511,9 @@ ridesRouter.post("/", requireAuth, async (req: Request, res: Response) => {
 
 /**
  * POST /rides/:id/cancel
+ *
+ *  - Marks ride cancelled_by_user.
+ *  - If cancelled at least cancel_refund_cutoff_minutes before pickup, refund 1 credit.
  */
 ridesRouter.post("/:id/cancel", requireAuth, async (req: Request, res: Response) => {
   const authUser = req.user;
@@ -544,8 +545,10 @@ ridesRouter.post("/:id/cancel", requireAuth, async (req: Request, res: Response)
     }
 
     const ride = rideResult.rows[0] as {
+      id: number;
       status: string;
       pickup_time: string | null;
+      type: string | null;
     };
 
     if (
@@ -556,7 +559,23 @@ ridesRouter.post("/:id/cancel", requireAuth, async (req: Request, res: Response)
       return res.status(400).json({ error: "Ride is already cancelled." });
     }
 
-    // TODO: enforce "cancel up to 15 min before pickup" rule
+    const aiConfig = getAiConfig();
+    const cutoffMinutes = aiConfig.cancel_refund_cutoff_minutes || 30;
+
+    let shouldRefund = false;
+    if (ride.pickup_time) {
+      const pickupDate = new Date(ride.pickup_time);
+      if (!Number.isNaN(pickupDate.getTime())) {
+        const now = new Date();
+        const diffMinutes =
+          (pickupDate.getTime() - now.getTime()) / (60 * 1000);
+        if (diffMinutes >= cutoffMinutes) {
+          shouldRefund = true;
+        }
+      }
+    }
+
+    // Mark ride as cancelled_by_user
     await pool.query(
       `
       UPDATE rides
@@ -565,6 +584,43 @@ ridesRouter.post("/:id/cancel", requireAuth, async (req: Request, res: Response)
       `,
       [rideId]
     );
+
+    // Optional: refund credit if cancelling early enough
+    if (shouldRefund && ride.type) {
+      try {
+        const now = new Date();
+        const monthStart = new Date(
+          Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)
+        );
+
+        if (ride.type === "grocery") {
+          await pool.query(
+            `
+            UPDATE ride_credits_monthly
+            SET grocery_used = GREATEST(grocery_used - 1, 0)
+            WHERE user_id = $1 AND month_start = $2
+            `,
+            [userId, monthStart]
+          );
+        } else {
+          // treat any non-grocery type as standard
+          await pool.query(
+            `
+            UPDATE ride_credits_monthly
+            SET standard_used = GREATEST(standard_used - 1, 0)
+            WHERE user_id = $1 AND month_start = $2
+            `,
+            [userId, monthStart]
+          );
+        }
+      } catch (refundErr) {
+        console.warn(
+          "Failed to refund credit on cancellation (ride_id=%s):",
+          rideId,
+          refundErr
+        );
+      }
+    }
 
     // Optional: send cancellation SMS
     try {
