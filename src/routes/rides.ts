@@ -709,6 +709,22 @@ ridesRouter.post("/:id/cancel", requireAuth, async (req: Request, res: Response)
       `,
       [rideId]
     );
+     // Log lifecycle event for auditing
+    try {
+      await logRideEvent({
+        rideId,
+        oldStatus: ride.status as RideStatus,
+        newStatus: "cancelled_by_user",
+        actorType: "rider",
+        actorId: userId,
+      });
+    } catch (logErr) {
+      console.warn(
+        "Failed to log cancellation event for ride %s:",
+        rideId,
+        logErr
+      );
+    }
 
     // Optional: refund credit if cancelling early enough
     if (shouldRefund && ride.type) {
