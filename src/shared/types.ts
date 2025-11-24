@@ -1,14 +1,12 @@
-// Shared domain & API types used by both backend and frontend.
-// Keep this file free of any Node / Express imports so it can be reused.
+/**
+ * Shared TypeScript types that can be imported by both backend and frontend.
+ * Step 1/10 – foundation only, we can extend these as V2 grows.
+ */
 
-export type UserRole = "rider" | "driver" | "admin";
+export type UserRole = "subscriber" | "rider" | "driver" | "admin";
 
-// Ride lifecycle statuses used across the app.
-// NOTE: Some legacy rows may still use "pending" or "requested" –
-// keep them in the union for compatibility.
 export type RideStatus =
   | "pending"
-  | "requested"
   | "scheduled"
   | "driver_en_route"
   | "arrived"
@@ -17,40 +15,49 @@ export type RideStatus =
   | "cancelled"
   | "cancelled_by_user"
   | "cancelled_by_admin"
-  | "cancelled_by_driver"
-  | "no_show";
+  | "cancelled_by_driver";
 
 export type SubscriptionStatus = "pending" | "active" | "paused" | "cancelled";
 
-// Logical plan codes. Backed by subscription_plans in V2.
 export type PlanCode = "premium" | "standard" | "light";
 
+/**
+ * Core ride record as stored in the database.
+ * We keep this intentionally loose for now and tighten it over time.
+ */
 export interface Ride {
   id: number;
   user_id: number;
-  driver_id: number | null;
   pickup_location: string;
   dropoff_location: string;
-  pickup_lat: number | null;
-  pickup_lng: number | null;
-  drop_lat: number | null;
-  drop_lng: number | null;
-  pickup_time: string; // UTC ISO string
-  pickup_window_start: string | null; // UTC ISO
-  pickup_window_end: string | null; // UTC ISO
-  arrival_window_start: string | null; // UTC ISO
-  arrival_window_end: string | null; // UTC ISO
-  arrival_target_time: string | null; // UTC ISO
-  ride_type: "standard" | "grocery";
+  pickup_time: string | null; // ISO string in UTC
+  dropoff_time?: string | null; // ISO string in UTC
   status: RideStatus;
-  notes: string | null;
-  created_at: string; // UTC ISO
+  ride_type?: string | null;
+  driver_id?: number | null;
+  is_fixed?: boolean;
+  created_at: string; // ISO string in UTC
+  [key: string]: any;
 }
 
+/**
+ * Ride with a few joined user / driver fields for richer UIs.
+ * Exact shape can evolve; frontend should treat the extra fields as optional.
+ */
 export interface RideWithDetails extends Ride {
-  user_name?: string | null;
-  user_phone?: string | null;
-  plan_code?: PlanCode | null;
+  rider_name?: string | null;
+  rider_phone?: string | null;
+  driver_name?: string | null;
+}
+
+/**
+ * Mirrors the existing CreditsSummary type in lib/credits.ts.
+ */
+export interface CreditsSummary {
+  standard_total: number;
+  standard_used: number;
+  grocery_total: number;
+  grocery_used: number;
 }
 
 export interface Subscription {
@@ -58,37 +65,32 @@ export interface Subscription {
   user_id: number;
   plan_code: PlanCode;
   status: SubscriptionStatus;
-  period_start: string; // ISO date (YYYY-MM-DD) in UTC
-  period_end: string; // ISO date (YYYY-MM-DD) in UTC
-  created_at: string; // UTC ISO
+  start_date: string; // ISO date string (UTC)
+  end_date: string; // ISO date string (UTC)
 }
 
-export interface CreditsSummary {
-  standard_total: number;
-  standard_used: number;
-  grocery_total: number;
-  grocery_used: number;
-  period_start: string; // ISO date
-  period_end: string; // ISO date
-}
-
-export type CommuteDirection = "to_work" | "to_home";
+/**
+ * Weekly schedule template describing a user's routine.
+ */
+export type ScheduleKind = "to_work" | "from_work";
 
 export interface ScheduleTemplate {
   id: number;
   user_id: number;
-  day_of_week: number; // 0–6 (0 = Sunday)
-  direction: CommuteDirection;
-  arrival_time: string; // "HH:MM" in local time
+  day_of_week: number; // 0 (Sunday) – 6 (Saturday)
+  kind: ScheduleKind;
+  desired_arrival_time: string; // "HH:MM" in local time
+  flex_minutes?: number | null;
+  enabled: boolean;
 }
 
-// Standard API envelopes used across the app.
+/**
+ * Standard API response shapes.
+ */
 export type ApiError = {
   ok: false;
   code: string;
   message: string;
-  // Legacy field so old frontend code that reads `error` still works.
-  error?: string;
 };
 
 export type ApiSuccess<T> = {
@@ -96,4 +98,4 @@ export type ApiSuccess<T> = {
   data: T;
 };
 
-export type ApiResponse<T> = ApiSuccess<T> | ApiError;
+export type ApiResponse<T> = ApiError | ApiSuccess<T>;
