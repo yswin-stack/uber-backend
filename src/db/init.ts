@@ -298,6 +298,113 @@ export async function initDb() {
       ON user_discounts(user_id);
     `);
 
+        //
+    // SUBSCRIPTION PLANS & CREDITS (V2)
+    //
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS subscription_plans (
+        id SERIAL PRIMARY KEY,
+        code TEXT UNIQUE NOT NULL,
+        name TEXT NOT NULL,
+        description TEXT,
+        monthly_price_cents INTEGER NOT NULL,
+        included_ride_credits INTEGER NOT NULL DEFAULT 0,
+        included_grocery_credits INTEGER NOT NULL DEFAULT 0,
+        peak_access BOOLEAN NOT NULL DEFAULT false,
+        max_slots INTEGER,
+        is_active BOOLEAN NOT NULL DEFAULT true,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_subscription_plans_code
+      ON subscription_plans(code);
+    `);
+
+    // Ensure extra columns exist on subscriptions for plan linkage & periods.
+    await client.query(`
+      ALTER TABLE subscriptions
+      ADD COLUMN IF NOT EXISTS plan_id INTEGER REFERENCES subscription_plans(id);
+    `);
+
+    await client.query(`
+      ALTER TABLE subscriptions
+      ADD COLUMN IF NOT EXISTS current_period_start DATE;
+    `);
+
+    await client.query(`
+      ALTER TABLE subscriptions
+      ADD COLUMN IF NOT EXISTS current_period_end DATE;
+    `);
+
+    await client.query(`
+      ALTER TABLE subscriptions
+      ADD COLUMN IF NOT EXISTS payment_method TEXT;
+    `);
+
+    await client.query(`
+      ALTER TABLE subscriptions
+      ADD COLUMN IF NOT EXISTS notes TEXT;
+    `);
+
+    // Seed the three core plans (idempotent).
+    await client.query(`
+      INSERT INTO subscription_plans (
+        code,
+        name,
+        description,
+        monthly_price_cents,
+        included_ride_credits,
+        included_grocery_credits,
+        peak_access,
+        max_slots,
+        is_active
+      )
+      VALUES
+        (
+          'premium',
+          'Premium Plan',
+          '40 rides / month with peak-hour access and highest reliability.',
+          20000,
+          40,
+          4,
+          true,
+          20,
+          true
+        ),
+        (
+          'standard',
+          'Standard Plan',
+          '40 rides / month outside of peak windows. Great for mid-day classes or shifts.',
+          15000,
+          40,
+          4,
+          false,
+          NULL,
+          true
+        ),
+        (
+          'light',
+          'Light Plan',
+          'Light plan with fewer rides per month for lighter schedules or occasional commuting.',
+          10000,
+          15,
+          2,
+          false,
+          NULL,
+          true
+        )
+      ON CONFLICT (code) DO UPDATE SET
+        name = EXCLUDED.name,
+        description = EXCLUDED.description,
+        monthly_price_cents = EXCLUDED.monthly_price_cents,
+        included_ride_credits = EXCLUDED.included_ride_credits,
+        included_grocery_credits = EXCLUDED.included_grocery_credits,
+        peak_access = EXCLUDED.peak_access,
+        max_slots = EXCLUDED.max_slots,
+        is_active = EXCLUDED.is_active;
+    `);
+
+
     await client.query("COMMIT");
     console.log("✅ Database initialized (tables ensured).");
   } catch (err) {
