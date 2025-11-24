@@ -77,6 +77,36 @@ adminRouter.get("/users", async (req: Request, res: Response) => {
 });
 
 /**
+ * POST /admin/jobs/monthly-reset
+ *
+ * Triggers the monthly reset job manually.
+ * Use this with a scheduler (e.g. Render cron hitting this endpoint once a day).
+ */
+adminRouter.post(
+  "/jobs/monthly-reset",
+  requireAuth,
+  requireRole("admin"),
+  async (_req: Request, res: Response) => {
+    try {
+      await runMonthlyResetJob();
+      return res.json(ok({ ran: true }));
+    } catch (err) {
+      console.error("Error running monthly reset job:", err);
+      return res
+        .status(500)
+        .json(
+          fail(
+            "MONTHLY_RESET_FAILED",
+            "Failed to run monthly reset job. See server logs."
+          )
+        );
+    }
+  }
+);
+
+
+
+/**
  * POST /admin/subscriptions/:userId/activate
  *
  * Body: { planCode, paymentMethod, notes? }
