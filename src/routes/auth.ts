@@ -107,22 +107,15 @@ authRouter.post("/login", async (req, res) => {
  * POST /auth/register
  * Body: { phone, pin, name?, email? }
  */
-authRouter.post("/register", async (req, res) => {
-  const { phone, pin, name, email } = req.body || {};
-
-  if (!phone || !pin) {
-    return res
-      .status(400)
-      .json({ error: "Phone and 4-digit PIN are required." });
-  }
-
-  if (typeof pin !== "string" || !/^\d{4}$/.test(pin)) {
-    return res.status(400).json({ error: "PIN must be 4 digits." });
-  }
-
   const normalizedPhone = normalizePhone(String(phone));
   const nameVal: string | null = name ? String(name).trim() : null;
-  const emailVal: string = email ? String(email).trim() : "";
+
+  // Email must satisfy UNIQUE NOT NULL in many DB setups.
+  // If user didn't give one, synthesize a unique placeholder based on phone.
+  let emailVal: string = email ? String(email).trim() : "";
+  if (!emailVal) {
+    emailVal = `${normalizedPhone.replace(/[^0-9+]/g, "")}@placeholder.local`;
+  }
 
   try {
     const existing = await pool.query(
@@ -142,6 +135,7 @@ authRouter.post("/register", async (req, res) => {
     `,
       [normalizedPhone, pin, nameVal, emailVal]
     );
+
 
     const user = insert.rows[0];
 
