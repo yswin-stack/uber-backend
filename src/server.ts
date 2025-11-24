@@ -15,6 +15,7 @@ import userRouter from "./routes/user";
 import driverRouter from "./routes/driver";
 import { initDb } from "./db/init";
 import { setupTrackingSockets } from "./sockets/tracking";
+import { authMiddleware } from "./middleware/auth";
 
 dotenv.config();
 
@@ -54,6 +55,9 @@ app.get("/", (_req, res) => {
 //  - /user/...
 //  - /driver/...
 app.use("/auth", authRouter);
+
+app.use(authMiddleware);
+
 app.use("/rides", ridesRouter);
 app.use("/schedule", scheduleRouter);
 app.use("/admin", adminRouter);
