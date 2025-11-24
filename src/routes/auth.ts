@@ -44,11 +44,13 @@ authRouter.post("/login", async (req, res) => {
   if (!phone || !pin) {
     return res
       .status(400)
-      .json({ error: "Phone and 4-digit PIN are required." });
+      .json(fail("AUTH_MISSING_FIELDS", "Phone and 4-digit PIN are required."));
   }
 
   if (typeof pin !== "string" || !/^\d{4}$/.test(pin)) {
-    return res.status(400).json({ error: "PIN must be 4 digits." });
+    return res
+      .status(400)
+      .json(fail("AUTH_INVALID_PIN_FORMAT", "PIN must be 4 digits."));
   }
 
   const normalizedPhone = normalizePhone(String(phone));
@@ -64,13 +66,17 @@ authRouter.post("/login", async (req, res) => {
     );
 
     if (result.rows.length === 0) {
-      return res.status(401).json({ error: "Invalid phone or PIN." });
+      return res
+        .status(401)
+        .json(fail("AUTH_INVALID_CREDENTIALS", "Invalid phone or PIN."));
     }
 
     const user = result.rows[0];
 
     if (!user.pin || String(user.pin) !== pin) {
-      return res.status(401).json({ error: "Invalid phone or PIN." });
+      return res
+        .status(401)
+        .json(fail("AUTH_INVALID_CREDENTIALS", "Invalid phone or PIN."));
     }
 
     // Decide role based on the normalized phone they used to log in
@@ -96,15 +102,20 @@ authRouter.post("/login", async (req, res) => {
       role,
     };
 
-    return res.json({
-      user: safeUser,
-      token: null, // JWT later
-    });
+    return res.json(
+      ok({
+        user: safeUser,
+        token: null, // JWT later (Step 2)
+      })
+    );
   } catch (err) {
     console.error("Error in POST /auth/login:", err);
-    return res.status(500).json({ error: "Internal server error" });
+    return res
+      .status(500)
+      .json(fail("AUTH_INTERNAL_ERROR", "Internal server error"));
   }
 });
+
 
 /**
  * POST /auth/register
@@ -116,11 +127,13 @@ authRouter.post("/register", async (req, res) => {
   if (!phone || !pin) {
     return res
       .status(400)
-      .json({ error: "Phone and 4-digit PIN are required." });
+      .json(fail("AUTH_MISSING_FIELDS", "Phone and 4-digit PIN are required."));
   }
 
   if (typeof pin !== "string" || !/^\d{4}$/.test(pin)) {
-    return res.status(400).json({ error: "PIN must be 4 digits." });
+    return res
+      .status(400)
+      .json(fail("AUTH_INVALID_PIN_FORMAT", "PIN must be 4 digits."));
   }
 
   const normalizedPhone = normalizePhone(String(phone));
@@ -141,7 +154,9 @@ authRouter.post("/register", async (req, res) => {
     );
 
     if (existing.rows.length > 0) {
-      return res.status(409).json({ error: "User already exists." });
+      return res
+        .status(409)
+        .json(fail("REGISTER_USER_EXISTS", "User already exists."));
     }
 
     const insert = await pool.query(
@@ -155,15 +170,20 @@ authRouter.post("/register", async (req, res) => {
 
     const user = insert.rows[0];
 
-    return res.status(201).json({
-      user,
-      token: null,
-    });
+    return res.status(201).json(
+      ok({
+        user,
+        token: null,
+      })
+    );
   } catch (err) {
     console.error("Error in POST /auth/register:", err);
-    return res.status(500).json({ error: "Internal server error" });
+    return res
+      .status(500)
+      .json(fail("AUTH_INTERNAL_ERROR", "Internal server error"));
   }
 });
+
 
 
 export default authRouter;
