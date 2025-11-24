@@ -1,59 +1,40 @@
-// Time helpers used across the backend (and safe for frontend reuse via build tooling).
-// Convention: all timestamps persisted in the database are UTC ISO strings.
-
-import { APP_TIMEZONE } from "../shared/constants";
+/**
+ * Time utilities.
+ *
+ * Convention: all timestamps persisted in the database are UTC ISO strings.
+ * We keep presentation in the app localised to APP_TIMEZONE ("America/Winnipeg").
+ */
 
 /**
- * Convert a Date to a UTC ISO-8601 string (e.g. 2025-01-02T15:04:05.000Z).
+ * Convert a Date to a UTC ISO string suitable for storing in the DB.
  */
 export function toUtcIso(date: Date): string {
-  return date.toISOString();
+  return new Date(date.getTime()).toISOString();
 }
 
 /**
- * Parse a UTC ISO-8601 string into a Date.
- * NOTE: Date objects are always stored internally as UTC.
+ * Parse a UTC ISO timestamp coming from the DB.
  */
-export function parseUtc(dateString: string): Date {
-  return new Date(dateString);
+export function parseUtc(isoString: string): Date {
+  return new Date(isoString);
 }
 
 /**
- * Given a Date that represents local time in APP_TIMEZONE,
- * return the corresponding UTC ISO string for persistence.
+ * Convert a local Date (server-local timezone) to a new Date object representing
+ * the same wall-clock time in UTC.
  *
- * For now we assume the incoming Date already encodes the correct
- * local clock time and just store it as an instant in UTC.
+ * NOTE: this is a simple helper that relies on the Node.js process timezone.
+ * For more advanced timezone handling we can introduce a dedicated library later.
  */
-export function localToUtc(date: Date): string {
-  return date.toISOString();
+export function localToUtc(localDate: Date): Date {
+  const offsetMinutes = localDate.getTimezoneOffset();
+  return new Date(localDate.getTime() - offsetMinutes * 60_000);
 }
 
 /**
- * Convert a UTC Date or ISO string into a JS Date.
- * Rendering in APP_TIMEZONE should be handled by the caller
- * (typically the frontend using Intl.DateTimeFormat with
- * timeZone: APP_TIMEZONE).
+ * Convert a UTC Date to the server-local timezone.
  */
-export function utcToLocal(value: Date | string): Date {
-  if (value instanceof Date) return value;
-  return new Date(value);
-}
-
-/**
- * Utility to format a Date into "HH:MM" in APP_TIMEZONE.
- * This is mainly useful for debugging or logs.
- */
-export function formatTimeLocal(date: Date): string {
-  const fmt = new Intl.DateTimeFormat("en-CA", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-    timeZone: APP_TIMEZONE,
-  });
-
-  const parts = fmt.formatToParts(date);
-  const hour = parts.find((p) => p.type === "hour")?.value ?? "00";
-  const minute = parts.find((p) => p.type === "minute")?.value ?? "00";
-  return `${hour}:${minute}`;
+export function utcToLocal(utcDate: Date): Date {
+  const offsetMinutes = utcDate.getTimezoneOffset();
+  return new Date(utcDate.getTime() + offsetMinutes * 60_000);
 }
