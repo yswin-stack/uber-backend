@@ -1,6 +1,7 @@
 import express from "express";
 import { pool } from "../db/pool";
 import { ok, fail } from "../lib/apiResponse";
+import jwt from "jsonwebtoken";
 
 
 
@@ -12,6 +13,21 @@ const ADMIN_PHONE = "+14313389073";
 /**
  * Normalize phone into a canonical format that matches DB.
  */
+const JWT_SECRET = process.env.JWT_SECRET || "";
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "7d";
+
+function signAuthToken(payload: { id: number; role: string; phone?: string | null }) {
+  if (!JWT_SECRET) {
+    console.warn(
+      "[auth] JWT_SECRET is not set – token will be null. Configure JWT_SECRET in env."
+    );
+    return null;
+  }
+
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+}
+
+
 export function normalizePhone(input: string): string {
   const trimmed = input.trim();
   const digits = trimmed.replace(/\D/g, "");
@@ -102,10 +118,27 @@ authRouter.post("/login", async (req, res) => {
       role,
     };
 
+    const token = signAuthToken({
+      id: safeUser.id,
+      role,
+      phone: safeUser.phone,
+    });
+
+    // If you later want httpOnly cookies, you can set them here.
+    // For now we rely on JSON token (frontend sends Authorization: Bearer <token>).
+    // if (token) {
+    //   res.cookie("auth_token", token, {
+    //     httpOnly: true,
+    //     secure: process.env.NODE_ENV === "production",
+    //     sameSite: "lax",
+    //     maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+    //   });
+    // }
+
     return res.json(
       ok({
         user: safeUser,
-        token: null, // JWT later (Step 2)
+        token, // may be null if JWT_SECRET not configured
       })
     );
   } catch (err) {
