@@ -75,6 +75,80 @@ adminRouter.get("/users", async (req: Request, res: Response) => {
 });
 
 /**
+ * POST /admin/subscriptions/:userId/activate
+ *
+ * Body: { planCode, paymentMethod, notes? }
+ *  - planCode: "premium" | "standard" | "light"
+ *  - paymentMethod: "cash" | "card_placeholder" | "apple_pay_placeholder"
+ */
+adminRouter.post(
+  "/subscriptions/:userId/activate",
+  requireAuth,
+  requireRole("admin"),
+  async (req, res) => {
+    const userId = Number(req.params.userId);
+    const { planCode, paymentMethod, notes } = req.body as {
+      planCode?: PlanCode;
+      paymentMethod?: "cash" | "card_placeholder" | "apple_pay_placeholder";
+      notes?: string;
+    };
+
+    if (!userId || Number.isNaN(userId)) {
+      return res
+        .status(400)
+        .json(fail("INVALID_USER_ID", "Invalid userId parameter."));
+    }
+
+    if (!planCode) {
+      return res
+        .status(400)
+        .json(fail("PLAN_CODE_REQUIRED", "planCode is required."));
+    }
+
+    if (
+      !paymentMethod ||
+      !["cash", "card_placeholder", "apple_pay_placeholder"].includes(
+        paymentMethod
+      )
+    ) {
+      return res.status(400).json(
+        fail(
+          "PAYMENT_METHOD_REQUIRED",
+          "paymentMethod must be one of: cash, card_placeholder, apple_pay_placeholder."
+        )
+      );
+    }
+
+    try {
+      const subscription = await activateSubscription(
+        userId,
+        planCode,
+        paymentMethod,
+        notes
+      );
+
+      const credits = await getCreditsSummaryForUser(userId);
+
+      return res.json(ok({ subscription, credits }));
+    } catch (err: any) {
+      console.error(
+        "Error in POST /admin/subscriptions/:userId/activate:",
+        err
+      );
+      return res
+        .status(500)
+        .json(
+          fail(
+            "SUBSCRIPTION_ACTIVATE_FAILED",
+            err?.message || "Failed to activate subscription."
+          )
+        );
+    }
+  }
+);
+
+
+/**
  * POST /admin/promote-driver
  * - Promote an existing user (by phone) to driver role.
  */
