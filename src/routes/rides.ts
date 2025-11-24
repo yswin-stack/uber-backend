@@ -9,7 +9,6 @@ import { requireAuth } from "../middleware/auth";
 import { isInPeakWindow } from "../lib/peak";
 import { getActiveSubscription } from "../services/subscriptionService";
 
-
 const ridesRouter = Router();
 
 // Service zone: around University of Manitoba
@@ -65,21 +64,22 @@ ridesRouter.get("/", requireAuth, async (req: Request, res: Response) => {
   }
 });
 
-
 /**
  * GET /rides/:id
  */
-ridesRouter.get("/:id", async (req: Request, res: Response) => {
-  const userId = getUserIdFromHeader(req);
-  if (!userId) {
+ridesRouter.get("/:id", requireAuth, async (req: Request, res: Response) => {
+  const authUser = req.user;
+  if (!authUser) {
     return res
       .status(401)
-      .json({ error: "Missing or invalid x-user-id header." });
+      .json(fail("AUTH_REQUIRED", "Please log in to view this ride."));
   }
 
+  const userId = authUser.id;
   const rideId = parseInt(req.params.id, 10);
+
   if (Number.isNaN(rideId)) {
-    return res.status(400).json({ error: "Invalid ride id." });
+    return res.status(400).json(fail("INVALID_RIDE_ID", "Invalid ride id."));
   }
 
   try {
@@ -88,12 +88,15 @@ ridesRouter.get("/:id", async (req: Request, res: Response) => {
       [rideId, userId]
     );
     if (result.rowCount === 0) {
-      return res.status(404).json({ error: "Ride not found." });
+      return res.status(404).json(fail("RIDE_NOT_FOUND", "Ride not found."));
     }
+    // Keep success shape similar to V1: { ride: ... }
     return res.json({ ride: result.rows[0] });
   } catch (err) {
     console.error("Error in GET /rides/:id:", err);
-    return res.status(500).json({ error: "Failed to fetch ride." });
+    return res
+      .status(500)
+      .json(fail("RIDE_FETCH_FAILED", "Failed to fetch ride."));
   }
 });
 
@@ -102,13 +105,15 @@ ridesRouter.get("/:id", async (req: Request, res: Response) => {
  *
  * Core "arrive-by" booking endpoint.
  */
-ridesRouter.post("/", async (req: Request, res: Response) => {
-  const userId = getUserIdFromHeader(req);
-  if (!userId) {
+ridesRouter.post("/", requireAuth, async (req: Request, res: Response) => {
+  const authUser = req.user;
+  if (!authUser) {
     return res
       .status(401)
-      .json({ error: "Missing or invalid x-user-id header." });
+      .json({ error: "Please log in before booking a ride." });
   }
+
+  const userId = authUser.id;
 
   const {
     pickup_address,
@@ -234,6 +239,30 @@ ridesRouter.post("/", async (req: Request, res: Response) => {
     arriveBy,
     ARRIVAL_WINDOW_HALF_SPAN_MIN
   );
+
+  //
+  // 3.5) Peak window enforcement (Premium-only access)
+  //
+  try {
+    const inPeak = isInPeakWindow(pickupTimeObj);
+    if (inPeak) {
+      const active = await getActiveSubscription(userId);
+      const hasPeakAccess = !!(active && active.plan.peak_access);
+
+      if (!hasPeakAccess) {
+        return res.status(400).json({
+          error:
+            "This time is reserved for Premium riders. Choose a different time or upgrade your plan.",
+        });
+      }
+    }
+  } catch (err) {
+    console.error("Peak check error:", err);
+    return res.status(500).json({
+      error:
+        "Failed to validate your plan for this time. Please try again or choose a different time.",
+    });
+  }
 
   //
   // 4) Capacity rule: max 4 rides per hour (configurable)
@@ -367,9 +396,9 @@ ridesRouter.post("/", async (req: Request, res: Response) => {
 
     if (!isGrocery) {
       if (credits.standard_used >= credits.standard_total) {
-        return res
-          .status(400)
-          .json({ error: "You have no standard ride credits left this month." });
+        return res.status(400).json({
+          error: "You have no standard ride credits left this month.",
+        });
       }
     } else {
       if (credits.grocery_used >= credits.grocery_total) {
@@ -467,6 +496,7 @@ ridesRouter.post("/", async (req: Request, res: Response) => {
       console.warn("Failed to send booking confirmation SMS:", notifyErr);
     }
 
+    // ✅ Keep response shape identical to V1 so frontend continues to work
     return res.status(201).json({
       ride,
       travel_minutes: travelMinutes,
@@ -484,15 +514,17 @@ ridesRouter.post("/", async (req: Request, res: Response) => {
 /**
  * POST /rides/:id/cancel
  */
-ridesRouter.post("/:id/cancel", async (req: Request, res: Response) => {
-  const userId = getUserIdFromHeader(req);
-  if (!userId) {
+ridesRouter.post("/:id/cancel", requireAuth, async (req: Request, res: Response) => {
+  const authUser = req.user;
+  if (!authUser) {
     return res
       .status(401)
-      .json({ error: "Missing or invalid x-user-id header." });
+      .json({ error: "Please log in before cancelling a ride." });
   }
 
+  const userId = authUser.id;
   const rideId = parseInt(req.params.id, 10);
+
   if (Number.isNaN(rideId)) {
     return res.status(400).json({ error: "Invalid ride id." });
   }
