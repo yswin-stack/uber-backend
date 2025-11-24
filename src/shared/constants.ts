@@ -1,18 +1,32 @@
-// Shared constants for both backend and frontend.
+import { PlanCode, RideStatus, SubscriptionStatus } from "./types";
 
-import type { RideStatus, SubscriptionStatus, PlanCode } from "./types";
+/**
+ * Shared constants (routes, enums, time rules) used across backend + frontend.
+ */
 
-export const APP_TIMEZONE = "America/Winnipeg" as const;
+// Timezone: all DB timestamps are stored as UTC, but we present times in this TZ.
+export const APP_TIMEZONE = "America/Winnipeg";
 
-// Peak window definition (local time in APP_TIMEZONE).
+// Peak window constants – purely declarative for now.
 export const PEAK_MORNING_START = "07:00";
 export const PEAK_MORNING_END = "10:00";
+
 export const PEAK_EVENING_START = "16:00";
 export const PEAK_EVENING_END = "18:00";
 
-export const ALL_RIDE_STATUSES: readonly RideStatus[] = [
+// Route helpers (frontend can re-use these when building links)
+export const API_ROUTES = {
+  LOGIN: "/auth/login",
+  REGISTER: "/auth/register",
+  ME: "/me",
+  RIDES: "/rides",
+  DRIVER_RIDES_TODAY: "/driver/rides/today",
+  ADMIN_USERS: "/admin/users",
+} as const;
+
+// Enum-style collections for UI dropdowns / validations.
+export const RIDE_STATUSES: RideStatus[] = [
   "pending",
-  "requested",
   "scheduled",
   "driver_en_route",
   "arrived",
@@ -22,28 +36,13 @@ export const ALL_RIDE_STATUSES: readonly RideStatus[] = [
   "cancelled_by_user",
   "cancelled_by_admin",
   "cancelled_by_driver",
-  "no_show",
-] as const;
+];
 
-export const ALL_SUBSCRIPTION_STATUSES: readonly SubscriptionStatus[] = [
+export const SUBSCRIPTION_STATUSES: SubscriptionStatus[] = [
   "pending",
   "active",
   "paused",
   "cancelled",
-] as const;
+];
 
-export const ALL_PLAN_CODES: readonly PlanCode[] = [
-  "premium",
-  "standard",
-  "light",
-] as const;
-
-// Optional route helpers your frontend can reuse later.
-export const API_ROUTES = {
-  login: "/auth/login",
-  register: "/auth/register",
-  me: "/user/me",
-  rides: "/rides",
-  driverToday: "/driver/rides/today",
-  adminUsers: "/admin/users",
-} as const;
+export const PLAN_CODES: PlanCode[] = ["premium", "standard", "light"];
