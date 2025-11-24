@@ -34,10 +34,11 @@ export interface ActiveSubscription {
  * Compute the start and end of the current billing period.
  * For now: calendar month in UTC, e.g. 2025-11-01 to 2025-11-30.
  */
-function getCurrentMonthBounds(date: Date = new Date()): {
+export function getCurrentMonthBounds(date: Date = new Date()): {
   period_start: string;
   period_end: string;
 } {
+
   const year = date.getUTCFullYear();
   const month = date.getUTCMonth(); // 0-based
 
