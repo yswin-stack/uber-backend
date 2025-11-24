@@ -28,14 +28,18 @@ function addMinutes(date: Date, minutes: number): Date {
 /**
  * GET /rides
  *  - list rides for the logged-in user (recent history + upcoming)
+ *  - now secured via JWT (requireAuth) and req.user.id
  */
-ridesRouter.get("/", async (req: Request, res: Response) => {
-  const userId = getUserIdFromHeader(req);
-  if (!userId) {
+ridesRouter.get("/", requireAuth, async (req: Request, res: Response) => {
+  const authUser = req.user;
+  if (!authUser) {
+    // should not happen because requireAuth already checks, but for safety:
     return res
       .status(401)
       .json(fail("AUTH_REQUIRED", "Please log in to view your rides."));
   }
+
+  const userId = authUser.id;
 
   try {
     const result = await pool.query(
@@ -49,7 +53,6 @@ ridesRouter.get("/", async (req: Request, res: Response) => {
       [userId]
     );
 
-    // Standard success shape: { ok: true, data: Ride[] }
     return res.json(ok(result.rows));
   } catch (err) {
     console.error("Error in GET /rides:", err);
