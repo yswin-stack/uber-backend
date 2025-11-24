@@ -14,6 +14,8 @@ import {
 } from "../services/subscriptionService";
 import { requireAuth, requireRole } from "../middleware/auth";
 import type { PlanCode } from "../shared/types";
+import { runMonthlyResetJob } from "../jobs/monthlyReset";
+
 
 
 const adminRouter = Router();
