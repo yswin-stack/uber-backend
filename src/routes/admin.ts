@@ -15,6 +15,9 @@ import {
 import { requireAuth, requireRole } from "../middleware/auth";
 import type { PlanCode } from "../shared/types";
 import { runMonthlyResetJob } from "../jobs/monthlyReset";
+import { generateUpcomingRides } from "../jobs/generateUpcomingRides";
+
+
 
 
 
@@ -98,6 +101,46 @@ adminRouter.post(
           fail(
             "MONTHLY_RESET_FAILED",
             "Failed to run monthly reset job. See server logs."
+          )
+        );
+    }
+  }
+);
+
+/**
+ * POST /admin/jobs/generate-upcoming-rides
+ *
+ * Triggers the weekly schedule → rides generator for the next N days (default 7).
+ * You can hit this from a cron job once a night.
+ *
+ * Optional JSON body: { "daysAhead": number }
+ */
+adminRouter.post(
+  "/jobs/generate-upcoming-rides",
+  requireAuth,
+  requireRole("admin"),
+  async (req: Request, res: Response) => {
+    const body = (req as any).body || {};
+    const raw = body.daysAhead;
+    const daysAhead =
+      typeof raw === "number" && !Number.isNaN(raw) ? raw : 7;
+
+    try {
+      await generateUpcomingRides(daysAhead);
+      return res.json(
+        ok({
+          ran: true,
+          daysAhead,
+        })
+      );
+    } catch (err) {
+      console.error("Failed to run schedule generator:", err);
+      return res
+        .status(500)
+        .json(
+          fail(
+            "SCHEDULE_GENERATOR_FAILED",
+            "Failed to run schedule generator. See server logs."
           )
         );
     }
