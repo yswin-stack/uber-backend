@@ -1,48 +1,32 @@
-import { Response } from "express";
 import type { ApiError, ApiSuccess } from "../shared/types";
 
 /**
- * Helper to send a successful JSON response in the standard envelope:
- * { ok: true, data, ...data }
- *
- * We also spread the data at the top level so legacy callers that expect
- * just `{ rides: [...] }` or `{ user, token }` keep working.
+ * Helper to build a standard success payload.
+ * We ignore the optional statusCode argument here and let route handlers
+ * choose the HTTP status when calling res.status(...).
  */
 export function ok<T>(
-  res: Response,
   data: T,
-  statusCode = 200
-): Response<ApiSuccess<T> & T> {
-  const body: any = {
-    ok: true as const,
+  _statusCode: number = 200
+): ApiSuccess<T> {
+  return {
+    ok: true,
     data,
   };
-
-  if (data && typeof data === "object") {
-    Object.assign(body, data);
-  }
-
-  return res.status(statusCode).json(body);
 }
 
 /**
- * Helper to send an error response in the standard envelope:
- * { ok: false, code, message, error }
- *
- * We keep `error` as an alias of `message` for older callers.
+ * Helper to build a standard error payload.
+ * Callers are expected to choose the HTTP status code on the Express response.
  */
 export function fail(
-  res: Response,
   code: string,
   message: string,
-  statusCode = 400
-): Response<ApiError> {
-  const body: ApiError = {
+  _statusCode: number = 400
+): ApiError {
+  return {
     ok: false,
     code,
     message,
-    error: message,
   };
-
-  return res.status(statusCode).json(body);
 }
