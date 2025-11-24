@@ -26,7 +26,6 @@ function addMinutes(date: Date, minutes: number): Date {
 }
 
 /**
-/**
  * GET /rides
  *  - list rides for the logged-in user (recent history + upcoming)
  */
