@@ -517,6 +517,124 @@ ridesRouter.post("/", requireAuth, async (req: Request, res: Response) => {
 });
 
 /**
+ * POST /rides/:id/status
+ *
+ * Body: { newStatus: RideStatus }
+ *
+ * Used by driver/admin to move a ride through:
+ *  pending -> driver_en_route -> arrived -> in_progress -> completed
+ * and to cancel as driver/admin.
+ */
+ridesRouter.post(
+  "/:id/status",
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const authUser = req.user!;
+    const rideId = parseInt(req.params.id, 10);
+
+    if (Number.isNaN(rideId)) {
+      return res
+        .status(400)
+        .json(fail("INVALID_RIDE_ID", "Invalid ride id."));
+    }
+
+    const { newStatus } = req.body as { newStatus?: RideStatus };
+
+    if (!newStatus) {
+      return res
+        .status(400)
+        .json(
+          fail("NEW_STATUS_REQUIRED", "newStatus field is required.")
+        );
+    }
+
+    // Only driver/admin may call this endpoint (riders use /cancel)
+    const role = authUser.role;
+    if (role !== "driver" && role !== "admin") {
+      return res.status(403).json(
+        fail(
+          "FORBIDDEN",
+          "Only driver or admin may update ride status via this endpoint."
+        )
+      );
+    }
+
+    let actorType: RideActorType = "driver";
+    if (role === "admin") actorType = "admin";
+
+    try {
+      const rideRes = await pool.query(
+        `
+        SELECT id, user_id, status
+        FROM rides
+        WHERE id = $1
+        `,
+        [rideId]
+      );
+
+      if (rideRes.rowCount === 0) {
+        return res
+          .status(404)
+          .json(fail("RIDE_NOT_FOUND", "Ride not found."));
+      }
+
+      const ride = rideRes.rows[0] as {
+        id: number;
+        user_id: number;
+        status: RideStatus;
+      };
+
+      const oldStatus = ride.status;
+
+      // Validate state machine transition
+      if (!canTransition(oldStatus, newStatus)) {
+        return res.status(400).json(
+          fail(
+            "INVALID_STATUS_TRANSITION",
+            `Cannot transition from ${oldStatus} to ${newStatus}.`
+          )
+        );
+      }
+
+      // Update ride status
+      const updateRes = await pool.query(
+        `
+        UPDATE rides
+        SET status = $1
+        WHERE id = $2
+        RETURNING *
+        `,
+        [newStatus, rideId]
+      );
+
+      const updated = updateRes.rows[0];
+
+      // Log lifecycle event
+      await logRideEvent({
+        rideId,
+        oldStatus,
+        newStatus,
+        actorType,
+        actorId: authUser.id,
+      });
+
+      return res.json(ok(updated));
+    } catch (err) {
+      console.error("Error in POST /rides/:id/status:", err);
+      return res
+        .status(500)
+        .json(
+          fail(
+            "RIDE_STATUS_UPDATE_FAILED",
+            "Failed to update ride status."
+          )
+        );
+    }
+  }
+);
+
+
+/**
  * POST /rides/:id/cancel
  *
  *  - Marks ride cancelled_by_user.
