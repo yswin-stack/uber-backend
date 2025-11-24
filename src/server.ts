@@ -16,6 +16,8 @@ import driverRouter from "./routes/driver";
 import { initDb } from "./db/init";
 import { setupTrackingSockets } from "./sockets/tracking";
 import { authMiddleware } from "./middleware/auth";
+import { plansRouter } from "./routes/plans";
+
 
 dotenv.config();
 
@@ -66,6 +68,8 @@ app.use("/dev", devRouter);
 app.use("/slots", slotsRouter);
 app.use("/user", userRouter);
 app.use("/driver", driverRouter);
+app.use("/plans", plansRouter);
+
 
 const PORT = process.env.PORT || 10000;
 
