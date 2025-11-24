@@ -7,6 +7,15 @@ import {
   markReferralRewardApplied,
 } from "../services/referrals";
 
+import { ok, fail } from "../lib/apiResponse";
+import {
+  activateSubscription,
+  getCreditsSummaryForUser,
+} from "../services/subscriptionService";
+import { requireAuth, requireRole } from "../middleware/auth";
+import type { PlanCode } from "../shared/types";
+
+
 const adminRouter = Router();
 
 /**
