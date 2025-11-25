@@ -447,3 +447,12 @@ if (require.main === module) {
       process.exit(1);
     });
 }
+
+/**
+ * Small admin-friendly wrapper so routes/admin.ts can trigger the job
+ * without worrying about parameters.
+ */
+export async function runGenerateUpcomingRidesJob(): Promise<void> {
+  return generateUpcomingRides(7);
+}
+
