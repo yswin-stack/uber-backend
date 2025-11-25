@@ -1,3 +1,4 @@
+// src/server.ts
 import express from "express";
 import cors from "cors";
 import http from "http";
@@ -17,6 +18,7 @@ import { meRouter } from "./routes/me";
 import { plansRouter } from "./routes/plans";
 import { initDb } from "./db/init";
 import { setupTrackingSockets } from "./sockets/tracking";
+import { notFoundHandler, errorHandler } from "./middleware/errorHandler";
 
 dotenv.config();
 
@@ -57,6 +59,10 @@ app.use("/user", userRouter);
 app.use("/driver", driverRouter);
 app.use("/me", meRouter);
 app.use("/plans", plansRouter);
+
+// 404 + error handlers (must be after all routes)
+app.use(notFoundHandler);
+app.use(errorHandler);
 
 // HTTP + Socket.IO server
 const server = http.createServer(app);
