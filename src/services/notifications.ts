@@ -14,166 +14,127 @@ if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && TWILIO_FROM_NUMBER) {
     twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
     console.log("✅ Twilio SMS client initialized.");
   } catch (err) {
-    console.warn("⚠️ Failed to initialize Twilio. SMS will be logged only.", err);
+    console.error("❌ Failed to initialize Twilio client:", err);
     twilioClient = null;
   }
 } else {
   console.log(
-    "ℹ️ Twilio env vars not set (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER). SMS will be logged only."
+    "ℹ️ Twilio not configured (TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_FROM_NUMBER). SMS will be logged only."
   );
 }
 
-type RideNotificationStatus =
-  | "booking_confirmed"
-  | "driver_en_route"
-  | "arrived"
-  | "in_progress"
-  | "completed"
-  | "cancelled"
-  | "cancelled_by_user"
-  | "cancelled_by_admin";
-
 /**
  * Low-level SMS sender.
+ * If Twilio is configured, we send a real SMS; otherwise we log to stdout.
  */
-async function sendSms(phone: string, body: string): Promise<void> {
-  if (!phone) return;
+export async function sendSms(to: string, message: string): Promise<void> {
+  if (!to) {
+    console.warn("[SMS] No destination phone provided. Skipping.");
+    return;
+  }
 
   if (!twilioClient || !TWILIO_FROM_NUMBER) {
-    console.log(`[SMS MOCK] to ${phone}: ${body}`);
+    console.log(`[SMS MOCK] To=${to} :: ${message}`);
     return;
   }
 
   try {
     await twilioClient.messages.create({
+      to,
       from: TWILIO_FROM_NUMBER,
-      to: phone,
-      body,
+      body: message,
     });
-    console.log("[SMS] Sent to", phone);
+    console.log("[SMS] Sent message to", to);
   } catch (err) {
-    console.error("❌ Failed to send SMS via Twilio:", err);
+    console.error("[SMS] Failed to send SMS via Twilio:", err);
   }
 }
 
+// Events around a ride lifecycle that we care about for notifications.
+// These include both actual statuses and synthetic "booking_confirmed".
+export type RideStatusNotificationEvent =
+  | "booking_confirmed"
+  | "driver_en_route"
+  | "arrived"
+  | "in_progress"
+  | "completed"
+  | "cancelled_by_user"
+  | "cancelled_by_admin"
+  | "cancelled"
+  | "no_show";
+
 /**
- * Build a human-readable message based on ride + status.
+ * Builds a human-readable SMS message for a given ride event.
  */
-function buildStatusMessage(
-  status: RideNotificationStatus | string,
-  userName: string | null,
-  ride: {
-    pickup_location: string;
-    dropoff_location: string;
-    pickup_window_start: string | null;
-    pickup_window_end: string | null;
-    arrival_window_start: string | null;
-    arrival_window_end: string | null;
-  },
+function buildRideStatusMessage(
+  event: RideStatusNotificationEvent,
   pickupTimeIso: string | null
 ): string {
-  const namePrefix = userName ? `Hi ${userName}, ` : "";
+  let timePart = "";
+  if (pickupTimeIso) {
+    try {
+      const d = new Date(pickupTimeIso);
+      if (!Number.isNaN(d.getTime())) {
+        const timeStr = d.toLocaleTimeString("en-CA", {
+          hour: "numeric",
+          minute: "2-digit",
+          hour12: true,
+        });
+        const dateStr = d.toLocaleDateString("en-CA", {
+          month: "short",
+          day: "numeric",
+        });
+        timePart = ` on ${dateStr} at ${timeStr}`;
+      }
+    } catch {
+      // ignore date formatting failures
+    }
+  }
 
-  const formatTime = (iso: string | null) => {
-    if (!iso) return "";
-    const d = new Date(iso);
-    const h = d.getHours();
-    const m = d.getMinutes();
-    const h12 = h % 12 === 0 ? 12 : h % 12;
-    const mm = m.toString().padStart(2, "0");
-    const suffix = h < 12 ? "AM" : "PM";
-    return `${h12}:${mm} ${suffix}`;
-  };
-
-  const pickupWindow =
-    ride.pickup_window_start && ride.pickup_window_end
-      ? `${formatTime(ride.pickup_window_start)}–${formatTime(
-          ride.pickup_window_end
-        )}`
-      : "";
-
-  const arrivalWindow =
-    ride.arrival_window_start && ride.arrival_window_end
-      ? `${formatTime(ride.arrival_window_start)}–${formatTime(
-          ride.arrival_window_end
-        )}`
-      : "";
-
-  const pickupTimeLabel = pickupTimeIso ? formatTime(pickupTimeIso) : "";
-
-  switch (status) {
+  switch (event) {
     case "booking_confirmed":
-      return (
-        namePrefix +
-        `your ride is booked: ${ride.pickup_location} → ${ride.dropoff_location}. ` +
-        (pickupWindow
-          ? `Pickup window: ${pickupWindow}.`
-          : pickupTimeLabel
-          ? `Pickup around ${pickupTimeLabel}.`
-          : "")
-      );
-
+      return `Your ride is booked${timePart}. We'll send updates as your driver heads out.`;
     case "driver_en_route":
-      return (
-        namePrefix +
-        `your driver is on the way to ${ride.pickup_location}. ` +
-        (pickupWindow ? `Pickup window: ${pickupWindow}.` : "")
-      );
-
+      return `Your driver is on the way${timePart}. Please be ready at your pickup point.`;
     case "arrived":
-      return (
-        namePrefix +
-        `your driver has arrived at ${ride.pickup_location}. Please head outside.`
-      );
-
+      return `Your driver has arrived${timePart}. Please head to the pickup point.`;
     case "in_progress":
-      return (
-        namePrefix +
-        `you’re on the way to ${ride.dropoff_location}. ` +
-        (arrivalWindow ? `Arrival window: ${arrivalWindow}.` : "")
-      );
-
+      return `You are now on your ride.`;
     case "completed":
-      return (
-        namePrefix +
-        `your ride from ${ride.pickup_location} to ${ride.dropoff_location} is complete. Thank you!`
-      );
-
-    case "cancelled":
+      return `Your ride is complete. Thank you for riding with us.`;
     case "cancelled_by_user":
-      return namePrefix + "your ride has been cancelled.";
-
+      return `Your ride has been cancelled as requested.`;
     case "cancelled_by_admin":
-      return (
-        namePrefix +
-        "your ride has been cancelled by the service. Please check the app or contact support if needed."
-      );
-
+      return `Your ride was cancelled by the service. If this wasn't expected, please contact support.`;
+    case "cancelled":
+      return `Your ride has been cancelled.`;
+    case "no_show":
+      return `Your driver waited but could not find you. This ride was marked as a no-show.`;
     default:
-      return (
-        namePrefix +
-        `your ride status changed (${status}). Check the app for the latest details.`
-      );
+      return `There's an update on your ride.`;
   }
 }
 
 /**
- * Main helper used by routes.
- * - Looks up user phone/name and ride info
- * - Builds message
- * - Sends SMS (or logs it)
- * - Inserts row into notifications table
+ * High-level helper used across the backend whenever ride status changes
+ * or a booking is created.
+ *
+ * - Looks up the user's phone number
+ * - Builds a friendly message
+ * - Sends SMS (real or mock)
+ * - Stores a record in the notifications table (best-effort)
  */
 export async function sendRideStatusNotification(
   userId: number,
   rideId: number,
-  status: RideNotificationStatus | string,
-  pickupTimeIso?: string | null
+  event: RideStatusNotificationEvent,
+  pickupTimeIso: string | null
 ): Promise<void> {
   try {
+    // 1) Get user's phone number (if present)
     const userRes = await pool.query(
       `
-      SELECT name, phone
+      SELECT phone
       FROM users
       WHERE id = $1
       `,
@@ -182,76 +143,45 @@ export async function sendRideStatusNotification(
 
     if (userRes.rowCount === 0) {
       console.warn(
-        "[Notifications] Cannot send SMS – user not found:",
+        "[Notifications] User not found when sending ride status notification:",
         userId
       );
       return;
     }
 
-    const { name, phone } = userRes.rows[0] as {
-      name: string | null;
-      phone: string | null;
-    };
-
+    const phone: string | null = userRes.rows[0].phone || null;
     if (!phone) {
       console.warn(
-        "[Notifications] Skipping SMS – user has no phone on file:",
-        userId
+        "[Notifications] User has no phone; skipping SMS for ride",
+        rideId
       );
       return;
     }
 
-    const rideRes = await pool.query(
-      `
-      SELECT
-        pickup_location,
-        dropoff_location,
-        pickup_window_start,
-        pickup_window_end,
-        arrival_window_start,
-        arrival_window_end,
-        pickup_time
-      FROM rides
-      WHERE id = $1
-      `,
-      [rideId]
-    );
-
-    if (rideRes.rowCount === 0) {
-      console.warn("[Notifications] Cannot send SMS – ride not found:", rideId);
-      return;
-    }
-
-    const ride = rideRes.rows[0] as {
-      pickup_location: string;
-      dropoff_location: string;
-      pickup_window_start: string | null;
-      pickup_window_end: string | null;
-      arrival_window_start: string | null;
-      arrival_window_end: string | null;
-      pickup_time: string | null;
-    };
-
-    const effectivePickupTimeIso =
-      pickupTimeIso || ride.pickup_time || null;
-
-    const message = buildStatusMessage(
-      status as RideNotificationStatus,
-      name,
-      ride,
-      effectivePickupTimeIso
-    );
-
+    // 2) Build message & send SMS
+    const message = buildRideStatusMessage(event, pickupTimeIso);
     await sendSms(phone, message);
 
-    await pool.query(
-      `
-      INSERT INTO notifications (user_id, ride_id, channel, message)
-      VALUES ($1, $2, $3, $4)
-      `,
-      [userId, rideId, "sms", message]
-    );
+    // 3) Best-effort: insert into notifications table for audit/history
+    try {
+      await pool.query(
+        `
+        INSERT INTO notifications (user_id, ride_id, channel, message)
+        VALUES ($1, $2, $3, $4)
+        `,
+        [userId, rideId, "sms", message]
+      );
+    } catch (err) {
+      // If the table doesn't exist yet, log and continue.
+      console.warn(
+        "[Notifications] Failed to persist notification record:",
+        err
+      );
+    }
   } catch (err) {
-    console.error("[Notifications] Failed to send ride status notification:", err);
+    console.error(
+      "[Notifications] Failed to send ride status notification:",
+      err
+    );
   }
 }
