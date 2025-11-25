@@ -26,8 +26,9 @@ function signAuthToken(payload: { id: number; role: string; phone?: string | nul
     return null;
   }
 
-  return jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
-}
+   return jwt.sign(payload, JWT_SECRET, {
+    expiresIn: JWT_EXPIRES_IN as any,
+  });
 
 
 export function normalizePhone(input: string): string {
