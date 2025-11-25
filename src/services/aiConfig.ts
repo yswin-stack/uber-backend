@@ -16,7 +16,11 @@ export type AiConfig = {
 
   // How early we try to arrive
   arrive_early_minutes: number;    // e.g. 5–8 min early
+
+  // Cancellation / refund rules
+  cancel_refund_cutoff_minutes: number; // min before pickup to refund credit
 };
+
 
 function numEnv(name: string, fallback: number): number {
   const raw = process.env[name];
