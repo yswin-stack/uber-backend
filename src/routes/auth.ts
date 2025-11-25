@@ -2,6 +2,8 @@ import express from "express";
 import { pool } from "../db/pool";
 import { ok, fail } from "../lib/apiResponse";
 import jwt from "jsonwebtoken";
+import { logEvent } from "../services/analytics";
+
 
 
 
@@ -123,6 +125,25 @@ authRouter.post("/login", async (req, res) => {
       role,
       phone: safeUser.phone,
     });
+
+        // Analytics: login event
+    try {
+      await logEvent("login", {
+        userId: safeUser.id,
+        role,
+        phone: safeUser.phone,
+      });
+    } catch (logErr) {
+      console.warn("[analytics] Failed to log login event:", logErr);
+    }
+
+    return res.json(
+      ok({
+        user: safeUser,
+        token, // may be null if JWT_SECRET not configured
+      })
+    );
+
 
     // If you later want httpOnly cookies, you can set them here.
     // For now we rely on JSON token (frontend sends Authorization: Bearer <token>).
