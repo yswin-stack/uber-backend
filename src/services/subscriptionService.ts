@@ -134,8 +134,9 @@ export async function getCurrentPeriod(userId: number): Promise<{
     [userId, period_start]
   );
 
-  const creditsRow =
-    creditsRes.rowCount > 0 ? (creditsRes.rows[0] as any) : null;
+   const creditsRow =
+    (creditsRes.rowCount ?? 0) > 0 ? (creditsRes.rows[0] as any) : null;
+
 
   return {
     period_start,
