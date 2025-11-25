@@ -35,16 +35,18 @@ function numEnv(name: string, fallback: number): number {
  */
 export function getAiConfig(): AiConfig {
   return {
-    travel_speed_kmh: numEnv("AI_TRAVEL_SPEED_KMH", 25),         // ~city driving
-    winter_speed_kmh: numEnv("AI_WINTER_SPEED_KMH", 14),         // slower in snow
-    snow_penalty_percent: numEnv("AI_SNOW_PENALTY_PERCENT", 18), // +18% default
+    travel_speed_kmh: numEnv("AI_TRAVEL_SPEED_KMH", 25),
+    winter_speed_kmh: numEnv("AI_WINTER_SPEED_KMH", 14),
+    snow_penalty_percent: numEnv("AI_SNOW_PENALTY_PERCENT", 18),
 
-    pickup_window_size: numEnv("AI_PICKUP_WINDOW_MIN", 10),      // 10 min window
-    arrival_window_size: numEnv("AI_ARRIVAL_WINDOW_MIN", 10),    // 10 min window
+    pickup_window_size: numEnv("AI_PICKUP_WINDOW_MIN", 10),
+    arrival_window_size: numEnv("AI_ARRIVAL_WINDOW_MIN", 10),
 
     max_rides_per_hour: numEnv("AI_MAX_RIDES_PER_HOUR", 4),
     overlap_buffer_minutes: numEnv("AI_OVERLAP_BUFFER_MIN", 30),
 
     arrive_early_minutes: numEnv("AI_ARRIVE_EARLY_MIN", 5),
+    cancel_refund_cutoff_minutes: numEnv("AI_CANCEL_REFUND_CUTOFF_MIN", 30),
   };
 }
+
