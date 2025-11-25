@@ -138,31 +138,17 @@ authRouter.post("/login", async (req, res) => {
       console.warn("[analytics] Failed to log login event:", logErr);
     }
 
+      // SUCCESS LOGIN RESPONSE
     return res.json(
       ok({
         user: safeUser,
         token, // may be null if JWT_SECRET not configured
       })
     );
-
 
     // If you later want httpOnly cookies, you can set them here.
-    // For now we rely on JSON token (frontend sends Authorization: Bearer <token>).
-    // if (token) {
-    //   res.cookie("auth_token", token, {
-    //     httpOnly: true,
-    //     secure: process.env.NODE_ENV === "production",
-    //     sameSite: "lax",
-    //     maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-    //   });
-    // }
+    // (Left as comment for future use)
 
-    return res.json(
-      ok({
-        user: safeUser,
-        token, // may be null if JWT_SECRET not configured
-      })
-    );
   } catch (err) {
     console.error("Error in POST /auth/login:", err);
     return res
