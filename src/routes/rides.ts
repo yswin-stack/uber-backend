@@ -9,6 +9,8 @@ import { requireAuth } from "../middleware/auth";
 import { isInPeakWindow } from "../lib/peak";
 import { getActiveSubscription } from "../services/subscriptionService";
 import type { RideStatus } from "../shared/types";
+import { logEvent } from "../services/analytics";
+
 import {
   canTransition,
   logRideEvent,
