@@ -13,55 +13,40 @@ import devRouter from "./routes/dev";
 import slotsRouter from "./routes/slots";
 import userRouter from "./routes/user";
 import driverRouter from "./routes/driver";
+import { meRouter } from "./routes/me";
+import { plansRouter } from "./routes/plans";
 import { initDb } from "./db/init";
 import { setupTrackingSockets } from "./sockets/tracking";
-import { authMiddleware } from "./middleware/auth";
-import { plansRouter } from "./routes/plans";
-import { meRouter } from "./routes/me";
-
-
 
 dotenv.config();
 
 const app = express();
-const server = http.createServer(app);
 
-const io = new Server(server, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  },
-});
-
-setupTrackingSockets(io);
+const corsOrigin =
+  process.env.CORS_ORIGIN && process.env.CORS_ORIGIN !== ""
+    ? process.env.CORS_ORIGIN
+    : "*";
 
 app.use(
   cors({
-    origin: "*",
+    origin: corsOrigin,
+    credentials: true,
   })
 );
 
 app.use(express.json());
 
-// --- Health check ---
+// Simple healthcheck
 app.get("/", (_req, res) => {
-  res.json({ ok: true, message: "Backend is running" });
+  res.json({ ok: true, message: "Backend is alive" });
 });
 
-// --- Routers mounted here ---
-//  - /auth/...
-//  - /rides/...
-//  - /schedule/...
-//  - /admin/...
-//  - /credits/...
-//  - /dev/...
-//  - /slots/...
-//  - /user/...
-//  - /driver/...
+app.get("/health", (_req, res) => {
+  res.json({ ok: true, status: "healthy" });
+});
+
+// REST routes
 app.use("/auth", authRouter);
-
-app.use(authMiddleware);
-
 app.use("/rides", ridesRouter);
 app.use("/schedule", scheduleRouter);
 app.use("/admin", adminRouter);
@@ -70,12 +55,24 @@ app.use("/dev", devRouter);
 app.use("/slots", slotsRouter);
 app.use("/user", userRouter);
 app.use("/driver", driverRouter);
-app.use("/plans", plansRouter);
 app.use("/me", meRouter);
+app.use("/plans", plansRouter);
 
+// HTTP + Socket.IO server
+const server = http.createServer(app);
 
+const io = new Server(server, {
+  cors: {
+    origin: corsOrigin,
+    methods: ["GET", "POST"],
+    credentials: true,
+  },
+});
 
-const PORT = process.env.PORT || 10000;
+// Setup ride-tracking sockets (location + ETA)
+setupTrackingSockets(io);
+
+const PORT = process.env.PORT || 4000;
 
 // --- Start server with DB init ---
 async function start() {
