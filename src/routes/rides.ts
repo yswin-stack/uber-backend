@@ -9,13 +9,14 @@ import { requireAuth } from "../middleware/auth";
 import { isInPeakWindow } from "../lib/peak";
 import { getActiveSubscription } from "../services/subscriptionService";
 import type { RideStatus } from "../shared/types";
-import { logEvent } from "../services/analytics";
 
 import {
   canTransition,
   logRideEvent,
   type RideActorType,
 } from "../services/rideStatus";
+import { logEvent } from "../services/analytics";
+
 
 
 const ridesRouter = Router();
@@ -501,6 +502,19 @@ ridesRouter.post("/", requireAuth, async (req: Request, res: Response) => {
       );
     } catch (notifyErr) {
       console.warn("Failed to send booking confirmation SMS:", notifyErr);
+    }
+
+     // Analytics: ride_created
+    try {
+      await logEvent("ride_created", {
+        rideId: ride.id,
+        userId,
+        type: isGrocery ? "grocery" : "standard",
+        pickup_time: ride.pickup_time,
+        arrival_target_time: ride.arrival_target_time,
+      });
+    } catch (logErr) {
+      console.warn("[analytics] Failed to log ride_created:", logErr);
     }
 
     // Keep response shape identical to V1 so frontend continues to work
