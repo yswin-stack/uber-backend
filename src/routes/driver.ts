@@ -1,6 +1,8 @@
 import { Router, Request, Response } from "express";
 import { pool } from "../db/pool";
 import { sendRideStatusNotification } from "../services/notifications";
+import { logEvent } from "../services/analytics";
+
 
 const driverRouter = Router();
 
@@ -368,6 +370,31 @@ driverRouter.post(
           "Failed to send ride status notification for ride %s:",
           rideId,
           notifyErr
+        );
+      }
+
+       // Analytics: ride_completed / ride_cancelled (no_show)
+      try {
+        if (newStatus === "completed") {
+          await logEvent("ride_completed", {
+            rideId,
+            userId: ride.user_id,
+            driverId: userId,
+            waitChargeCents: waitChargeCents ?? 0,
+          });
+        } else if (newStatus === "no_show") {
+          await logEvent("ride_cancelled", {
+            rideId,
+            userId: ride.user_id,
+            driverId: userId,
+            reason: "no_show",
+          });
+        }
+      } catch (logErr) {
+        console.warn(
+          "[analytics] Failed to log driver status event:",
+          newStatus,
+          logErr
         );
       }
 
