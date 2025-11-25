@@ -11,21 +11,21 @@ import { ok, fail } from "../lib/apiResponse";
 import {
   activateSubscription,
   getCreditsSummaryForUser,
+  getActiveSubscription,
+  getCurrentPeriod,
+  initCreditsForPlan,
 } from "../services/subscriptionService";
 import { requireAuth, requireRole } from "../middleware/auth";
 import type { PlanCode } from "../shared/types";
 import { runMonthlyResetJob } from "../jobs/monthlyReset";
-import { generateUpcomingRides } from "../jobs/generateUpcomingRides";
-
-
-
-
+import { runGenerateUpcomingRidesJob } from "../jobs/generateUpcomingRides";
 
 const adminRouter = Router();
 
 /**
  * Very simple check for admin.
- * Final version will use JWT or role table entries.
+ * Legacy check for older V1 admin pages that still send x-user-id / x-role.
+ * Newer endpoints use JWT via requireAuth/requireRole instead.
  */
 function ensureAdmin(req: Request, res: Response): number | null {
   const header = req.header("x-user-id");
@@ -51,8 +51,93 @@ function ensureAdmin(req: Request, res: Response): number | null {
 }
 
 /**
+ * GET /admin/ai/config
+ * - Reads current AI config from DB (if present).
+ */
+adminRouter.get("/ai/config", async (_req: Request, res: Response) => {
+  try {
+    const config = await getAiConfig();
+    return res.json({ ok: true, config });
+  } catch (err) {
+    console.error("Failed to load AI config:", err);
+    return res
+      .status(500)
+      .json({ ok: false, error: "Failed to load AI configuration." });
+  }
+});
+
+/**
+ * POST /admin/ai/load-balance
+ * - Manually trigger predictive load balancer for a day (for now: today).
+ */
+adminRouter.post("/ai/load-balance", async (req: Request, res: Response) => {
+  if (!ensureAdmin(req, res)) return;
+
+  try {
+    const targetDateStr = req.body?.date || new Date().toISOString().slice(0, 10);
+    const summary = await runPredictiveLoadBalancer(targetDateStr);
+    return res.json({ ok: true, summary });
+  } catch (err) {
+    console.error("Error in /admin/ai/load-balance:", err);
+    return res
+      .status(500)
+      .json({ ok: false, error: "Failed to run predictive load balancer." });
+  }
+});
+
+/**
+ * GET /admin/referrals
+ * - List all referrals and their status.
+ */
+adminRouter.get(
+  "/referrals",
+  requireAuth,
+  requireRole("admin"),
+  async (_req: Request, res: Response) => {
+    try {
+      const referrals = await listReferralsForAdmin();
+      return res.json(ok({ referrals }));
+    } catch (err) {
+      console.error("Error in GET /admin/referrals:", err);
+      return res
+        .status(500)
+        .json(fail("REFERRALS_LIST_FAILED", "Failed to list referrals."));
+    }
+  }
+);
+
+/**
+ * POST /admin/referrals/:id/apply
+ * - Mark a referral reward as applied.
+ */
+adminRouter.post(
+  "/referrals/:id/apply",
+  requireAuth,
+  requireRole("admin"),
+  async (req: Request, res: Response) => {
+    const referralId = Number(req.params.id);
+    if (!referralId || Number.isNaN(referralId)) {
+      return res
+        .status(400)
+        .json(fail("INVALID_REFERRAL_ID", "Invalid referral id."));
+    }
+
+    try {
+      await markReferralRewardApplied(referralId);
+      return res.json({ ok: true });
+    } catch (err) {
+      console.error("Error in POST /admin/referrals/:id/apply:", err);
+      return res
+        .status(500)
+        .json({ error: "Failed to mark referral reward as applied." });
+    }
+  }
+);
+
+/**
  * GET /admin/users
- * - List all users with basic info for admin view
+ * - Legacy simple user list for older admin UI.
+ *   Newer, richer user detail is available at GET /admin/users/:userId.
  */
 adminRouter.get("/users", async (req: Request, res: Response) => {
   if (!ensureAdmin(req, res)) return;
@@ -91,17 +176,14 @@ adminRouter.post(
   requireRole("admin"),
   async (_req: Request, res: Response) => {
     try {
-      await runMonthlyResetJob();
-      return res.json(ok({ ran: true }));
+      const summary = await runMonthlyResetJob();
+      return res.json(ok(summary));
     } catch (err) {
-      console.error("Error running monthly reset job:", err);
+      console.error("Error in POST /admin/jobs/monthly-reset:", err);
       return res
         .status(500)
         .json(
-          fail(
-            "MONTHLY_RESET_FAILED",
-            "Failed to run monthly reset job. See server logs."
-          )
+          fail("MONTHLY_RESET_FAILED", "Failed to run monthly reset job.")
         );
     }
   }
@@ -110,44 +192,32 @@ adminRouter.post(
 /**
  * POST /admin/jobs/generate-upcoming-rides
  *
- * Triggers the weekly schedule → rides generator for the next N days (default 7).
- * You can hit this from a cron job once a night.
- *
- * Optional JSON body: { "daysAhead": number }
+ * Trigger the nightly "generate upcoming rides" job manually.
  */
 adminRouter.post(
   "/jobs/generate-upcoming-rides",
   requireAuth,
   requireRole("admin"),
-  async (req: Request, res: Response) => {
-    const body = (req as any).body || {};
-    const raw = body.daysAhead;
-    const daysAhead =
-      typeof raw === "number" && !Number.isNaN(raw) ? raw : 7;
-
+  async (_req: Request, res: Response) => {
     try {
-      await generateUpcomingRides(daysAhead);
-      return res.json(
-        ok({
-          ran: true,
-          daysAhead,
-        })
-      );
+      const summary = await runGenerateUpcomingRidesJob();
+      return res.json(ok(summary));
     } catch (err) {
-      console.error("Failed to run schedule generator:", err);
+      console.error(
+        "Error in POST /admin/jobs/generate-upcoming-rides:",
+        err
+      );
       return res
         .status(500)
         .json(
           fail(
-            "SCHEDULE_GENERATOR_FAILED",
-            "Failed to run schedule generator. See server logs."
+            "GENERATE_UPCOMING_RIDES_FAILED",
+            "Failed to run upcoming rides generator."
           )
         );
     }
   }
 );
-
-
 
 /**
  * POST /admin/subscriptions/:userId/activate
@@ -201,7 +271,6 @@ adminRouter.post(
         paymentMethod,
         notes
       );
-
       const credits = await getCreditsSummaryForUser(userId);
 
       return res.json(ok({ subscription, credits }));
@@ -222,351 +291,308 @@ adminRouter.post(
   }
 );
 
-
 /**
- * POST /admin/promote-driver
- * - Promote an existing user (by phone) to driver role.
+ * GET /admin/users/:userId
+ * Detailed view for a single user: basic profile, active subscription,
+ * credits summary, schedule template, and recent rides.
  */
-adminRouter.post(
-  "/promote-driver",
+adminRouter.get(
+  "/users/:userId",
+  requireAuth,
+  requireRole("admin"),
   async (req: Request, res: Response) => {
-    const adminId = ensureAdmin(req, res);
-    if (!adminId) return;
+    const userId = Number(req.params.userId);
+    if (!userId || Number.isNaN(userId)) {
+      return res
+        .status(400)
+        .json(fail("INVALID_USER_ID", "Invalid userId parameter."));
+    }
 
     try {
-      const { phone } = req.body || {};
-      if (!phone) {
-        return res.status(400).json({ error: "phone is required." });
-      }
-
       const userRes = await pool.query(
         `
-        SELECT id, name, email, phone, role
+        SELECT
+          id,
+          name,
+          email,
+          phone,
+          role,
+          created_at
         FROM users
-        WHERE phone = $1
+        WHERE id = $1
         `,
-        [phone]
+        [userId]
       );
 
       if (userRes.rowCount === 0) {
-        return res.status(404).json({ error: "User not found." });
+        return res
+          .status(404)
+          .json(fail("USER_NOT_FOUND", "User not found."));
       }
 
       const user = userRes.rows[0];
 
-      if (user.role === "driver") {
-        return res.json({
-          ok: true,
+      // Active subscription + plan
+      const active = await getActiveSubscription(userId).catch(() => null);
+
+      // Credits summary (may fail if period/credits not initialized yet)
+      let credits = null;
+      try {
+        credits = await getCreditsSummaryForUser(userId);
+      } catch (err) {
+        console.warn(
+          "Failed to load credits summary for user %s:",
+          userId,
+          err
+        );
+      }
+
+      // Weekly schedule template
+      let schedule: any[] = [];
+      try {
+        const schedRes = await pool.query(
+          `
+          SELECT
+            id,
+            day_of_week,
+            direction,
+            pickup_time,
+            pickup_address,
+            dropoff_address,
+            is_active
+          FROM user_schedules
+          WHERE user_id = $1
+          ORDER BY day_of_week ASC, direction ASC, pickup_time ASC
+          `,
+          [userId]
+        );
+
+        schedule = schedRes.rows;
+      } catch (err) {
+        console.warn(
+          "Failed to load schedule template for user %s:",
+          userId,
+          err
+        );
+      }
+
+      // Recent rides history
+      let rides: any[] = [];
+      try {
+        const ridesRes = await pool.query(
+          `
+          SELECT
+            id,
+            pickup_location,
+            dropoff_location,
+            pickup_time,
+            status,
+            ride_type,
+            notes
+          FROM rides
+          WHERE user_id = $1
+          ORDER BY pickup_time DESC
+          LIMIT 100
+          `,
+          [userId]
+        );
+
+        rides = ridesRes.rows;
+      } catch (err) {
+        console.warn(
+          "Failed to load rides history for user %s:",
+          userId,
+          err
+        );
+      }
+
+      return res.json(
+        ok({
           user,
-          message: "User is already a driver.",
-        });
-      }
-
-      const updated = await pool.query(
-        `
-        UPDATE users
-        SET role = 'driver'
-        WHERE id = $1
-        RETURNING id, name, email, phone, role
-        `,
-        [user.id]
+          subscription: active ? active.subscription : null,
+          plan: active ? active.plan : null,
+          credits,
+          schedule,
+          rides,
+        })
       );
-
-      return res.json({
-        ok: true,
-        user: updated.rows[0],
-      });
     } catch (err) {
-      console.error("Admin promote-driver error:", err);
-      return res.status(500).json({ error: "Failed to promote user." });
-    }
-  }
-);
-
-/**
- * GET /admin/schedules
- * - For a given userId (optional), list weekly schedule entries.
- */
-adminRouter.get("/schedules", async (req: Request, res: Response) => {
-  if (!ensureAdmin(req, res)) return;
-
-  try {
-    const userIdParam = req.query.userId;
-    let sql = `
-      SELECT
-        s.id,
-        s.user_id,
-        s.day_of_week,
-        s.direction,
-        s.arrival_time,
-        u.name,
-        u.phone
-      FROM user_schedules s
-      JOIN users u ON u.id = s.user_id
-    `;
-    const params: any[] = [];
-
-    if (userIdParam) {
-      sql += " WHERE s.user_id = $1";
-      params.push(parseInt(String(userIdParam), 10));
-    }
-
-    sql += " ORDER BY s.user_id, s.day_of_week, s.arrival_time";
-
-    const schedulesRes = await pool.query(sql, params);
-    return res.json({ schedules: schedulesRes.rows });
-  } catch (err) {
-    console.error("Admin schedules error:", err);
-    return res.status(500).json({ error: "Failed to load schedules." });
-  }
-});
-
-/**
- * GET /admin/metrics/month
- * - Simple monthly subscription / rides stats for dashboard.
- */
-adminRouter.get("/metrics/month", async (req: Request, res: Response) => {
-  if (!ensureAdmin(req, res)) return;
-
-  try {
-    const now = new Date();
-    const start = new Date(now.getFullYear(), now.getMonth(), 1);
-    const end = new Date(now.getFullYear(), now.getMonth() + 1, 1);
-
-    const subs = await pool.query(
-      `
-      SELECT COUNT(*) AS active
-      FROM subscriptions
-      WHERE period_start >= $1
-        AND period_start < $2
-        AND status = 'active'
-      `,
-      [start, end]
-    );
-
-    const riderCount = await pool.query(
-      `
-      SELECT COUNT(*) AS cnt
-      FROM users
-      WHERE role = 'rider'
-      `
-    );
-
-    const totalRides = await pool.query(
-      `
-      SELECT COUNT(*) AS cnt
-      FROM rides
-      WHERE pickup_time >= $1
-        AND pickup_time < $2
-      `,
-      [start, end]
-    );
-
-    const activeDrivers = await pool.query(
-      `
-      SELECT COUNT(*) AS cnt
-      FROM users
-      WHERE role = 'driver'
-      `
-    );
-
-    return res.json({
-      active_subscribers: Number(riderCount.rows[0].count),
-      rides_created: Number(totalRides.rows[0].count),
-      drivers: Number(activeDrivers.rows[0].count),
-    });
-  } catch (err) {
-    console.error("Admin metrics month error:", err);
-    return res.status(500).json({ error: "Failed to load monthly metrics." });
-  }
-});
-
-/**
- * GET /admin/ai/config
- * - Exposes current AI tuning values (speed, snow penalties, etc.)
- */
-adminRouter.get("/ai/config", async (req: Request, res: Response) => {
-  if (!ensureAdmin(req, res)) return;
-
-  const cfg = getAiConfig();
-  return res.json(cfg);
-});
-
-/**
- * POST /admin/load-insights/run
- *
- * Runs the nightly predictive load balancer for a given day.
- * - If body.day or ?day=YYYY-MM-DD is provided, uses that.
- * - Otherwise defaults to "tomorrow" (UTC).
- */
-adminRouter.post(
-  "/load-insights/run",
-  async (req: Request, res: Response) => {
-    if (!ensureAdmin(req, res)) return;
-
-    try {
-      const bodyDay: string | undefined = req.body?.day;
-      const queryDay: string | undefined =
-        typeof req.query.day === "string" ? req.query.day : undefined;
-      const dayStr = bodyDay || queryDay || null;
-
-      let target: Date;
-      if (dayStr) {
-        const parsed = new Date(dayStr);
-        if (Number.isNaN(parsed.getTime())) {
-          return res
-            .status(400)
-            .json({ error: "Invalid day format. Use YYYY-MM-DD." });
-        }
-        target = parsed;
-      } else {
-        const now = new Date();
-        // Default: tomorrow in UTC
-        target = new Date(
-          Date.UTC(
-            now.getUTCFullYear(),
-            now.getUTCMonth(),
-            now.getUTCDate() + 1,
-            0,
-            0,
-            0,
-            0
-          )
-        );
-      }
-
-      const insight = await runPredictiveLoadBalancer(target);
-      return res.json({ ok: true, insight });
-    } catch (err) {
-      console.error("Error running predictive load balancer:", err);
+      console.error("Error in GET /admin/users/:userId:", err);
       return res
         .status(500)
-        .json({ error: "Failed to run predictive load balancer." });
+        .json(
+          fail(
+            "ADMIN_USER_DETAIL_FAILED",
+            "Failed to load admin user details."
+          )
+        );
     }
   }
 );
 
 /**
- * GET /admin/load-insights
+ * POST /admin/users/:userId/subscription
  *
- * Reads the latest daily_load_insights row for a given day.
- * - If ?day=YYYY-MM-DD provided, uses that.
- * - Otherwise defaults to "tomorrow" (UTC).
+ * A convenience wrapper for activating a subscription for a user.
+ * Body: { planCode, paymentMethod, notes? }
  */
-adminRouter.get(
-  "/load-insights",
+adminRouter.post(
+  "/users/:userId/subscription",
+  requireAuth,
+  requireRole("admin"),
   async (req: Request, res: Response) => {
-    if (!ensureAdmin(req, res)) return;
+    const userId = Number(req.params.userId);
+    const { planCode, paymentMethod, notes } = req.body as {
+      planCode?: PlanCode;
+      paymentMethod?: "cash" | "card_placeholder" | "apple_pay_placeholder";
+      notes?: string;
+    };
 
-    try {
-      const queryDay: string | undefined =
-        typeof req.query.day === "string" ? req.query.day : undefined;
+    if (!userId || Number.isNaN(userId)) {
+      return res
+        .status(400)
+        .json(fail("INVALID_USER_ID", "Invalid userId parameter."));
+    }
 
-      let target: Date;
-      if (queryDay) {
-        const parsed = new Date(queryDay);
-        if (Number.isNaN(parsed.getTime())) {
-          return res
-            .status(400)
-            .json({ error: "Invalid day format. Use YYYY-MM-DD." });
-        }
-        target = parsed;
-      } else {
-        const now = new Date();
-        target = new Date(
-          Date.UTC(
-            now.getUTCFullYear(),
-            now.getUTCMonth(),
-            now.getUTCDate() + 1,
-            0,
-            0,
-            0,
-            0
-          )
-        );
-      }
+    if (!planCode) {
+      return res
+        .status(400)
+        .json(fail("PLAN_CODE_REQUIRED", "planCode is required."));
+    }
 
-      const dayStr = target.toISOString().slice(0, 10);
-
-      // Ensure table exists (in case GET is called before POST /run)
-      await pool.query(`
-        CREATE TABLE IF NOT EXISTS daily_load_insights (
-          id SERIAL PRIMARY KEY,
-          day DATE NOT NULL,
-          generated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-          total_rides INTEGER NOT NULL,
-          recommended_start_time TIMESTAMPTZ,
-          overbooked_slots JSONB,
-          at_risk_rides JSONB
+    if (
+      !paymentMethod ||
+      !["cash", "card_placeholder", "apple_pay_placeholder"].includes(
+        paymentMethod
+      )
+    ) {
+      return res.status(400).json(
+        fail(
+          "PAYMENT_METHOD_REQUIRED",
+          "paymentMethod must be one of: cash, card_placeholder, apple_pay_placeholder."
         )
-      `);
-
-      const result = await pool.query(
-        `
-        SELECT *
-        FROM daily_load_insights
-        WHERE day = $1
-        ORDER BY generated_at DESC
-        LIMIT 1
-        `,
-        [dayStr]
       );
+    }
 
-      if (result.rowCount === 0) {
-        return res
-          .status(404)
-          .json({ error: "No load insights for that day yet." });
-      }
+    try {
+      const subscription = await activateSubscription(
+        userId,
+        planCode,
+        paymentMethod,
+        notes
+      );
+      const credits = await getCreditsSummaryForUser(userId);
 
-      return res.json({ insight: result.rows[0] });
-    } catch (err) {
-      console.error("Error reading load insights:", err);
+      return res.json(
+        ok({
+          subscription,
+          credits,
+        })
+      );
+    } catch (err: any) {
+      console.error("Error in POST /admin/users/:userId/subscription:", err);
       return res
         .status(500)
-        .json({ error: "Failed to load predictive insights." });
+        .json(
+          fail(
+            "ADMIN_USER_SUBSCRIPTION_FAILED",
+            err?.message || "Failed to update user subscription."
+          )
+        );
     }
   }
 );
 
 /**
- * GET /admin/referrals
- * - List recent referral activity.
- */
-adminRouter.get("/referrals", async (req: Request, res: Response) => {
-  if (!ensureAdmin(req, res)) return;
-
-  try {
-    const list = await listReferralsForAdmin(200);
-    return res.json({ referrals: list });
-  } catch (err) {
-    console.error("Error in GET /admin/referrals:", err);
-    return res.status(500).json({ error: "Failed to load referrals." });
-  }
-});
-
-/**
- * POST /admin/referrals/:id/apply
- * - Mark a referral reward as applied (e.g. discount given).
+ * POST /admin/users/:userId/credits
+ *
+ * Adjust a user's monthly ride credits.
+ * Body: { standardDelta?: number, groceryDelta?: number }
  */
 adminRouter.post(
-  "/referrals/:id/apply",
+  "/users/:userId/credits",
+  requireAuth,
+  requireRole("admin"),
   async (req: Request, res: Response) => {
-    if (!ensureAdmin(req, res)) return;
+    const userId = Number(req.params.userId);
+    const { standardDelta, groceryDelta } = req.body as {
+      standardDelta?: number;
+      groceryDelta?: number;
+    };
 
-    const idRaw = req.params.id;
-    const referralId = parseInt(idRaw, 10);
-    if (Number.isNaN(referralId)) {
-      return res.status(400).json({ error: "Invalid referral id." });
+    if (!userId || Number.isNaN(userId)) {
+      return res
+        .status(400)
+        .json(fail("INVALID_USER_ID", "Invalid userId parameter."));
+    }
+
+    const stdDelta = Number(standardDelta || 0);
+    const groDelta = Number(groceryDelta || 0);
+
+    if (stdDelta === 0 && groDelta === 0) {
+      return res.status(400).json(
+        fail(
+          "NO_DELTA_PROVIDED",
+          "Provide at least one of standardDelta or groceryDelta."
+        )
+      );
     }
 
     try {
-      await markReferralRewardApplied(referralId);
-      return res.json({ ok: true });
+      // Ensure current period & credits row exists
+      const period = await getCurrentPeriod(userId);
+      let creditsRow = period.creditsRow;
+
+      if (!creditsRow) {
+        // Try to bootstrap from active subscription
+        const active = await getActiveSubscription(userId);
+        if (!active) {
+          return res.status(400).json(
+            fail(
+              "NO_ACTIVE_SUBSCRIPTION",
+              "User has no active subscription; cannot adjust credits."
+            )
+          );
+        }
+
+        await initCreditsForPlan(userId, active.plan.code);
+        const refreshed = await getCurrentPeriod(userId);
+        creditsRow = refreshed.creditsRow;
+
+        if (!creditsRow) {
+          return res.status(500).json(
+            fail(
+              "CREDITS_INIT_FAILED",
+              "Failed to initialize credits for this user."
+            )
+          );
+        }
+      }
+
+      await pool.query(
+        `
+        UPDATE ride_credits_monthly
+        SET
+          standard_total = GREATEST(standard_total + $1, standard_used),
+          grocery_total = GREATEST(grocery_total + $2, grocery_used)
+        WHERE id = $3
+        `,
+        [stdDelta, groDelta, creditsRow.id]
+      );
+
+      const credits = await getCreditsSummaryForUser(userId);
+
+      return res.json(ok({ credits }));
     } catch (err) {
-      console.error("Error in POST /admin/referrals/:id/apply:", err);
+      console.error("Error in POST /admin/users/:userId/credits:", err);
       return res
         .status(500)
-        .json({ error: "Failed to mark referral reward as applied." });
+        .json(
+          fail(
+            "ADMIN_USER_CREDITS_FAILED",
+            "Failed to adjust user credits."
+          )
+        );
     }
   }
 );
