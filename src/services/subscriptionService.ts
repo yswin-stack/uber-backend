@@ -383,5 +383,19 @@ export async function activateSubscription(
     end_date,
   };
 
+   // Analytics: subscription activated/changed
+  try {
+    await logEvent("subscription_activate", {
+      userId,
+      planCode: plan.code,
+      paymentMethod,
+      period_start: subscription.start_date,
+      period_end: subscription.end_date,
+    });
+  } catch (logErr) {
+    console.warn("[analytics] Failed to log subscription_activate:", logErr);
+  }
+
+
   return subscription;
 }
