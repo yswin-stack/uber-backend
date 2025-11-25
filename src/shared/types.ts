@@ -15,7 +15,9 @@ export type RideStatus =
   | "cancelled"
   | "cancelled_by_user"
   | "cancelled_by_admin"
-  | "cancelled_by_driver";
+  | "cancelled_by_driver"
+  | "no_show";
+
 
 export type SubscriptionStatus = "pending" | "active" | "paused" | "cancelled";
 
