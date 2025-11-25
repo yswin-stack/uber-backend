@@ -349,10 +349,11 @@ async function generateForUser(
         ]
       );
 
-      if (overlapRes.rowCount > 0) {
+          if ((overlapRes.rowCount ?? 0) > 0) {
         // Already have a ride near this time; skip to avoid duplicates.
         continue;
       }
+
 
       // If we reached here, we can safely create the ride.
       if (standardRemaining <= 0) break;
