@@ -1,4 +1,6 @@
 import { pool } from "../db/pool";
+import { logEvent } from "./analytics";
+
 import type {
   PlanCode,
   SubscriptionStatus,
