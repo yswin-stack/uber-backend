@@ -791,6 +791,17 @@ ridesRouter.post("/:id/cancel", requireAuth, async (req: Request, res: Response)
       console.warn("Failed to send cancellation SMS:", notifyErr);
     }
 
+        // Analytics: ride_cancelled (by user)
+    try {
+      await logEvent("ride_cancelled", {
+        rideId,
+        userId,
+        by: "user",
+      });
+    } catch (logErr) {
+      console.warn("[analytics] Failed to log ride_cancelled (user):", logErr);
+    }
+
     return res.json({ ok: true });
   } catch (err) {
     console.error("Error cancelling ride:", err);
