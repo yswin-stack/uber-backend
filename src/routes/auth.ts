@@ -4,21 +4,19 @@ import { ok, fail } from "../lib/apiResponse";
 import jwt from "jsonwebtoken";
 import { logEvent } from "../services/analytics";
 
-
-
-
 const authRouter = express.Router();
 
 // Your super-admin phone (normalized)
 const ADMIN_PHONE = "+14313389073";
 
-/**
- * Normalize phone into a canonical format that matches DB.
- */
 const JWT_SECRET = process.env.JWT_SECRET || "";
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "7d";
 
-function signAuthToken(payload: { id: number; role: string; phone?: string | null }) {
+function signAuthToken(payload: {
+  id: number;
+  role: string;
+  phone?: string | null;
+}) {
   if (!JWT_SECRET) {
     console.warn(
       "[auth] JWT_SECRET is not set – token will be null. Configure JWT_SECRET in env."
@@ -26,11 +24,14 @@ function signAuthToken(payload: { id: number; role: string; phone?: string | nul
     return null;
   }
 
-   return jwt.sign(payload, JWT_SECRET, {
+  return jwt.sign(payload, JWT_SECRET, {
     expiresIn: JWT_EXPIRES_IN as any,
   });
+}
 
-
+/**
+ * Normalize phone into a canonical format that matches DB.
+ */
 export function normalizePhone(input: string): string {
   const trimmed = input.trim();
   const digits = trimmed.replace(/\D/g, "");
@@ -99,7 +100,14 @@ authRouter.post("/login", async (req, res) => {
     }
 
     // Decide role based on the normalized phone they used to log in
-    let role: string = user.role || "rider";
+    let role: "subscriber" | "driver" | "admin";
+
+    if (user.role === "driver" || user.role === "admin" || user.role === "subscriber") {
+      role = user.role;
+    } else {
+      // old "rider" or null -> treat as subscriber by default
+      role = "subscriber";
+    }
 
     if (normalizedPhone === ADMIN_PHONE) {
       role = "admin";
@@ -127,7 +135,7 @@ authRouter.post("/login", async (req, res) => {
       phone: safeUser.phone,
     });
 
-        // Analytics: login event
+    // Analytics: login event
     try {
       await logEvent("login", {
         userId: safeUser.id,
@@ -138,17 +146,13 @@ authRouter.post("/login", async (req, res) => {
       console.warn("[analytics] Failed to log login event:", logErr);
     }
 
-      // SUCCESS LOGIN RESPONSE
+    // SUCCESS LOGIN RESPONSE
     return res.json(
       ok({
         user: safeUser,
         token, // may be null if JWT_SECRET not configured
       })
     );
-
-    // If you later want httpOnly cookies, you can set them here.
-    // (Left as comment for future use)
-
   } catch (err) {
     console.error("Error in POST /auth/login:", err);
     return res
@@ -156,7 +160,6 @@ authRouter.post("/login", async (req, res) => {
       .json(fail("AUTH_INTERNAL_ERROR", "Internal server error"));
   }
 });
-
 
 /**
  * POST /auth/register
@@ -203,7 +206,7 @@ authRouter.post("/register", async (req, res) => {
     const insert = await pool.query(
       `
       INSERT INTO users (phone, pin, name, email, role)
-      VALUES ($1, $2, $3, $4, 'rider')
+      VALUES ($1, $2, $3, $4, 'subscriber')
       RETURNING id, name, phone, email, role
     `,
       [normalizedPhone, pin, nameVal, emailVal]
@@ -224,7 +227,5 @@ authRouter.post("/register", async (req, res) => {
       .json(fail("AUTH_INTERNAL_ERROR", "Internal server error"));
   }
 });
-
-
 
 export default authRouter;
