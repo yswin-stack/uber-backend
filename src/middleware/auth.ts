@@ -68,16 +68,24 @@ export function authMiddleware(
   }
 
   try {
-    const decoded = jwt.verify(token, JWT_SECRET) as JwtPayload;
-    if (!decoded || typeof decoded.id !== "number" || !decoded.role) {
-      return next();
-    }
+  const decoded = jwt.verify(token, JWT_SECRET) as JwtPayload;
+if (!decoded || typeof decoded.id !== "number" || !decoded.role) {
+  return next();
+}
 
-    req.user = {
-      id: decoded.id,
-      role: decoded.role,
-      phone: decoded.phone ?? null,
-    };
+const role = decoded.role;
+if (role !== "subscriber" && role !== "driver" && role !== "admin") {
+  // Unknown role in token – treat as unauthenticated.
+  return next();
+}
+
+req.user = {
+  id: decoded.id,
+  userId: decoded.id,
+  role,
+  phone: decoded.phone ?? null,
+};
+
 
     return next();
   } catch (err) {
