@@ -2,7 +2,7 @@ import type { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import { fail } from "../lib/apiResponse";
 
-type Role = "subscriber" | "driver" | "admin";
+export type Role = "subscriber" | "driver" | "admin";
 
 interface JwtPayload {
   id: number;
@@ -12,8 +12,19 @@ interface JwtPayload {
 
 const JWT_SECRET = process.env.JWT_SECRET || "";
 
-export function authMiddleware(required = false, allowedRoles?: Role[]) {
-  return async (req: Request, res: Response, next: NextFunction) => {
+/**
+ * Core auth middleware.
+ *
+ * - Tries JWT from Authorization: Bearer <token>
+ * - Falls back to legacy x-user-id / x-user-role headers
+ * - If `required` is true and no user -> 401
+ * - If `allowedRoles` is set and role not in it -> 403
+ */
+export function authMiddleware(
+  required: boolean = false,
+  allowedRoles?: Role[]
+) {
+  return (req: Request, res: Response, next: NextFunction) => {
     try {
       let user:
         | { id: number; userId: number; role: Role; phone?: string | null }
@@ -29,19 +40,21 @@ export function authMiddleware(required = false, allowedRoles?: Role[]) {
       if (token && JWT_SECRET) {
         try {
           const decoded = jwt.verify(token, JWT_SECRET) as JwtPayload;
-          const role = decoded.role as Role;
+          const decodedRole = decoded.role;
 
           if (
-            role === "subscriber" ||
-            role === "driver" ||
-            role === "admin"
+            decodedRole === "subscriber" ||
+            decodedRole === "driver" ||
+            decodedRole === "admin"
           ) {
             user = {
               id: decoded.id,
               userId: decoded.id,
-              role,
+              role: decodedRole,
               phone: decoded.phone ?? null,
             };
+          } else {
+            console.warn("[auth] Unknown role in JWT:", decodedRole);
           }
         } catch (err) {
           console.warn("[auth] Invalid JWT:", err);
@@ -64,7 +77,7 @@ export function authMiddleware(required = false, allowedRoles?: Role[]) {
         }
       }
 
-      // 3) No auth
+      // 3) No auth user resolved
       if (!user) {
         if (required) {
           return res
@@ -79,10 +92,10 @@ export function authMiddleware(required = false, allowedRoles?: Role[]) {
         return next();
       }
 
-      // 4) Attach to req.user
+      // 4) Attach to req.user so routes can read it
       (req as any).user = user;
 
-      // 5) Role gate
+      // 5) Role check if required
       if (allowedRoles && !allowedRoles.includes(user.role)) {
         return res
           .status(403)
@@ -107,4 +120,26 @@ export function authMiddleware(required = false, allowedRoles?: Role[]) {
       return next();
     }
   };
+}
+
+/**
+ * requireAuth
+ *
+ * Simple version of authMiddleware:
+ * - Requires a logged-in user of ANY role
+ */
+export const requireAuth = authMiddleware(true);
+
+/**
+ * requireRole
+ *
+ * Ensure the user is logged in and has one of the allowed roles.
+ *
+ * Usage examples:
+ *   router.get("/admin", requireRole("admin"), handler)
+ *   router.get("/driver", requireRole(["driver", "admin"]), handler)
+ */
+export function requireRole(roleOrRoles: Role | Role[]) {
+  const roles = Array.isArray(roleOrRoles) ? roleOrRoles : [roleOrRoles];
+  return authMiddleware(true, roles);
 }
