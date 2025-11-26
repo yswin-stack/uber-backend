@@ -17,8 +17,6 @@ import {
 } from "../services/rideStatus";
 import { logEvent } from "../services/analytics";
 
-
-
 const ridesRouter = Router();
 
 // Service zone: around University of Manitoba
@@ -417,7 +415,7 @@ ridesRouter.post("/", requireAuth, async (req: Request, res: Response) => {
     }
 
     //
-    // 7) Insert ride
+    // 7) Insert ride  (NOTE: use ride_type instead of type)
     //
     const insertResult = await pool.query(
       `
@@ -435,7 +433,7 @@ ridesRouter.post("/", requireAuth, async (req: Request, res: Response) => {
         pickup_window_end,
         arrival_window_start,
         arrival_window_end,
-        type,
+        ride_type,
         notes
       )
       VALUES (
@@ -504,7 +502,7 @@ ridesRouter.post("/", requireAuth, async (req: Request, res: Response) => {
       console.warn("Failed to send booking confirmation SMS:", notifyErr);
     }
 
-     // Analytics: ride_created
+    // Analytics: ride_created
     try {
       await logEvent("ride_created", {
         rideId: ride.id,
@@ -527,19 +525,15 @@ ridesRouter.post("/", requireAuth, async (req: Request, res: Response) => {
       arrival_window_end: arrivalWindowEnd.toISOString(),
     });
   } catch (err: any) {
-  console.error("Error in POST /rides:", err);
+    console.error("Error in POST /rides:", err);
 
-  // TEMP: surface more detail so frontend can show it
-  const message =
-    (err && err.message) ||
-    (typeof err === "string" ? err : null) ||
-    "Failed to create ride.";
+    const message =
+      (err && err.message) ||
+      (typeof err === "string" ? err : null) ||
+      "Failed to create ride.";
 
-  return res
-    .status(500)
-    .json(fail("RIDE_CREATE_FAILED", message));
-}
-
+    return res.status(500).json(fail("RIDE_CREATE_FAILED", message));
+  }
 });
 
 /**
@@ -659,165 +653,172 @@ ridesRouter.post(
   }
 );
 
-
 /**
  * POST /rides/:id/cancel
  *
  *  - Marks ride cancelled_by_user.
  *  - If cancelled at least cancel_refund_cutoff_minutes before pickup, refund 1 credit.
  */
-ridesRouter.post("/:id/cancel", requireAuth, async (req: Request, res: Response) => {
-  const authUser = req.user;
-  if (!authUser) {
-    return res
-      .status(401)
-      .json({ error: "Please log in before cancelling a ride." });
-  }
-
-  const userId = authUser.id;
-  const rideId = parseInt(req.params.id, 10);
-
-  if (Number.isNaN(rideId)) {
-    return res.status(400).json({ error: "Invalid ride id." });
-  }
-
-  try {
-    const rideResult = await pool.query(
-      `
-      SELECT *
-      FROM rides
-      WHERE id = $1 AND user_id = $2
-      `,
-      [rideId, userId]
-    );
-
-    if (rideResult.rowCount === 0) {
-      return res.status(404).json({ error: "Ride not found." });
+ridesRouter.post(
+  "/:id/cancel",
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const authUser = req.user;
+    if (!authUser) {
+      return res
+        .status(401)
+        .json({ error: "Please log in before cancelling a ride." });
     }
 
-    const ride = rideResult.rows[0] as {
-      id: number;
-      status: string;
-      pickup_time: string | null;
-      type: string | null;
-    };
+    const userId = authUser.id;
+    const rideId = parseInt(req.params.id, 10);
 
-    if (
-      ride.status === "cancelled" ||
-      ride.status === "cancelled_by_user" ||
-      ride.status === "cancelled_by_admin"
-    ) {
-      return res.status(400).json({ error: "Ride is already cancelled." });
+    if (Number.isNaN(rideId)) {
+      return res.status(400).json({ error: "Invalid ride id." });
     }
 
-    const aiConfig = getAiConfig();
-    const cutoffMinutes = aiConfig.cancel_refund_cutoff_minutes || 30;
+    try {
+      const rideResult = await pool.query(
+        `
+        SELECT *
+        FROM rides
+        WHERE id = $1 AND user_id = $2
+        `,
+        [rideId, userId]
+      );
 
-    let shouldRefund = false;
-    if (ride.pickup_time) {
-      const pickupDate = new Date(ride.pickup_time);
-      if (!Number.isNaN(pickupDate.getTime())) {
-        const now = new Date();
-        const diffMinutes =
-          (pickupDate.getTime() - now.getTime()) / (60 * 1000);
-        if (diffMinutes >= cutoffMinutes) {
-          shouldRefund = true;
+      if (rideResult.rowCount === 0) {
+        return res.status(404).json({ error: "Ride not found." });
+      }
+
+      const ride = rideResult.rows[0] as {
+        id: number;
+        status: string;
+        pickup_time: string | null;
+        ride_type: string | null;
+      };
+
+      if (
+        ride.status === "cancelled" ||
+        ride.status === "cancelled_by_user" ||
+        ride.status === "cancelled_by_admin"
+      ) {
+        return res.status(400).json({ error: "Ride is already cancelled." });
+      }
+
+      const aiConfig = getAiConfig();
+      const cutoffMinutes = aiConfig.cancel_refund_cutoff_minutes || 30;
+
+      let shouldRefund = false;
+      if (ride.pickup_time) {
+        const pickupDate = new Date(ride.pickup_time);
+        if (!Number.isNaN(pickupDate.getTime())) {
+          const now = new Date();
+          const diffMinutes =
+            (pickupDate.getTime() - now.getTime()) / (60 * 1000);
+          if (diffMinutes >= cutoffMinutes) {
+            shouldRefund = true;
+          }
         }
       }
-    }
 
-    // Mark ride as cancelled_by_user
-    await pool.query(
-      `
-      UPDATE rides
-      SET status = 'cancelled_by_user', cancelled_at = NOW()
-      WHERE id = $1
-      `,
-      [rideId]
-    );
-     // Log lifecycle event for auditing
-    try {
-      await logRideEvent({
-        rideId,
-        oldStatus: ride.status as RideStatus,
-        newStatus: "cancelled_by_user",
-        actorType: "rider",
-        actorId: userId,
-      });
-    } catch (logErr) {
-      console.warn(
-        "Failed to log cancellation event for ride %s:",
-        rideId,
-        logErr
+      // Mark ride as cancelled_by_user
+      await pool.query(
+        `
+        UPDATE rides
+        SET status = 'cancelled_by_user', cancelled_at = NOW()
+        WHERE id = $1
+        `,
+        [rideId]
       );
-    }
 
-    // Optional: refund credit if cancelling early enough
-    if (shouldRefund && ride.type) {
+      // Log lifecycle event for auditing
       try {
-        const now = new Date();
-        const monthStart = new Date(
-          Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)
-        );
-
-        if (ride.type === "grocery") {
-          await pool.query(
-            `
-            UPDATE ride_credits_monthly
-            SET grocery_used = GREATEST(grocery_used - 1, 0)
-            WHERE user_id = $1 AND month_start = $2
-            `,
-            [userId, monthStart]
-          );
-        } else {
-          // treat any non-grocery type as standard
-          await pool.query(
-            `
-            UPDATE ride_credits_monthly
-            SET standard_used = GREATEST(standard_used - 1, 0)
-            WHERE user_id = $1 AND month_start = $2
-            `,
-            [userId, monthStart]
-          );
-        }
-      } catch (refundErr) {
-        console.warn(
-          "Failed to refund credit on cancellation (ride_id=%s):",
+        await logRideEvent({
           rideId,
-          refundErr
+          oldStatus: ride.status as RideStatus,
+          newStatus: "cancelled_by_user",
+          actorType: "rider",
+          actorId: userId,
+        });
+      } catch (logErr) {
+        console.warn(
+          "Failed to log cancellation event for ride %s:",
+          rideId,
+          logErr
         );
       }
-    }
 
-    // Optional: send cancellation SMS
-    try {
-      await sendRideStatusNotification(
-        userId,
-        rideId,
-        "cancelled_by_user",
-        ride.pickup_time
-      );
-    } catch (notifyErr) {
-      console.warn("Failed to send cancellation SMS:", notifyErr);
-    }
+      // Optional: refund credit if cancelling early enough
+      if (shouldRefund && ride.ride_type) {
+        try {
+          const now = new Date();
+          const monthStart = new Date(
+            Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)
+          );
 
-        // Analytics: ride_cancelled (by user)
-    try {
-      await logEvent("ride_cancelled", {
-        rideId,
-        userId,
-        by: "user",
-      });
-    } catch (logErr) {
-      console.warn("[analytics] Failed to log ride_cancelled (user):", logErr);
-    }
+          if (ride.ride_type === "grocery") {
+            await pool.query(
+              `
+              UPDATE ride_credits_monthly
+              SET grocery_used = GREATEST(grocery_used - 1, 0)
+              WHERE user_id = $1 AND month_start = $2
+              `,
+              [userId, monthStart]
+            );
+          } else {
+            // treat any non-grocery type as standard
+            await pool.query(
+              `
+              UPDATE ride_credits_monthly
+              SET standard_used = GREATEST(standard_used - 1, 0)
+              WHERE user_id = $1 AND month_start = $2
+              `,
+              [userId, monthStart]
+            );
+          }
+        } catch (refundErr) {
+          console.warn(
+            "Failed to refund credit on cancellation (ride_id=%s):",
+            rideId,
+            refundErr
+          );
+        }
+      }
 
-    return res.json({ ok: true });
-  } catch (err) {
-    console.error("Error cancelling ride:", err);
-    return res.status(500).json({ error: "Failed to cancel ride." });
+      // Optional: send cancellation SMS
+      try {
+        await sendRideStatusNotification(
+          userId,
+          rideId,
+          "cancelled_by_user",
+          ride.pickup_time
+        );
+      } catch (notifyErr) {
+        console.warn("Failed to send cancellation SMS:", notifyErr);
+      }
+
+      // Analytics: ride_cancelled (by user)
+      try {
+        await logEvent("ride_cancelled", {
+          rideId,
+          userId,
+          by: "user",
+        });
+      } catch (logErr) {
+        console.warn(
+          "[analytics] Failed to log ride_cancelled (user):",
+          logErr
+        );
+      }
+
+      return res.json({ ok: true });
+    } catch (err) {
+      console.error("Error cancelling ride:", err);
+      return res.status(500).json({ error: "Failed to cancel ride." });
+    }
   }
-});
+);
 
 export { ridesRouter };
 export default ridesRouter;
