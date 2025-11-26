@@ -414,8 +414,9 @@ ridesRouter.post("/", requireAuth, async (req: Request, res: Response) => {
       }
     }
 
-    //
-    // 7) Insert ride  (NOTE: use ride_type instead of type)
+     //
+    // 7) Insert ride
+    //    New rides are immediately considered "scheduled" if they pass all validations.
     //
     const insertResult = await pool.query(
       `
@@ -434,13 +435,15 @@ ridesRouter.post("/", requireAuth, async (req: Request, res: Response) => {
         arrival_window_start,
         arrival_window_end,
         ride_type,
-        notes
+        notes,
+        status
       )
       VALUES (
         $1, $2, $3,
         $4, $5, $6, $7,
         $8, $9, $10, $11, $12, $13,
-        $14, $15
+        $14, $15,
+        'scheduled'
       )
       RETURNING *
       `,
@@ -462,6 +465,7 @@ ridesRouter.post("/", requireAuth, async (req: Request, res: Response) => {
         notes ?? null,
       ]
     );
+
 
     const ride = insertResult.rows[0];
 
