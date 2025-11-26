@@ -526,10 +526,20 @@ ridesRouter.post("/", requireAuth, async (req: Request, res: Response) => {
       arrival_window_start: arrivalWindowStart.toISOString(),
       arrival_window_end: arrivalWindowEnd.toISOString(),
     });
-  } catch (err) {
-    console.error("Error in POST /rides:", err);
-    return res.status(500).json({ error: "Failed to create ride." });
-  }
+  } catch (err: any) {
+  console.error("Error in POST /rides:", err);
+
+  // TEMP: surface more detail so frontend can show it
+  const message =
+    (err && err.message) ||
+    (typeof err === "string" ? err : null) ||
+    "Failed to create ride.";
+
+  return res
+    .status(500)
+    .json(fail("RIDE_CREATE_FAILED", message));
+}
+
 });
 
 /**
