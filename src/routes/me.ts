@@ -697,7 +697,7 @@ meRouter.post(
           remainingCredits: ridesRemaining,
         })
       );
-    } catch (err) {
+      } catch (err: any) {
       console.error("Error in POST /me/schedule/generate-rides:", err);
       try {
         await pool.query("ROLLBACK");
@@ -707,17 +707,17 @@ meRouter.post(
           rollbackErr
         );
       }
+
+      // 🔥 IMPORTANT: surface the real error message so we can see what’s wrong
+      const message =
+        err && typeof err === "object" && "message" in err && err.message
+          ? String(err.message)
+          : "Failed to generate rides from your schedule.";
+
       return res
         .status(500)
-        .json(
-          fail(
-            "GENERATE_RIDES_FAILED",
-            "Failed to generate rides from your schedule."
-          )
-        );
+        .json(fail("GENERATE_RIDES_FAILED", message));
     }
-  }
-);
 
 /**
  * --------------------------------------------------
