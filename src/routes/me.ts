@@ -43,6 +43,26 @@ type BackendScheduleRow = {
 };
 
 /**
+ * Saved locations used by weekly template:
+ *  - home
+ *  - work
+ *  - school
+ *  - other
+ */
+type SavedLocationLabel = "home" | "work" | "school" | "other";
+
+type SavedLocation = {
+  id: number;
+  label: SavedLocationLabel;
+  address: string;
+};
+
+type SaveLocationBody = {
+  label: SavedLocationLabel;
+  address: string;
+};
+
+/**
  * --------------------------------------------------
  *  GET /me/schedule
  *  Returns weekly schedule rows for the logged-in user.
@@ -239,6 +259,187 @@ meRouter.post(
 
 /**
  * --------------------------------------------------
+ *  GET /me/locations
+ *  Returns saved locations for this user:
+ *    - home
+ *    - work
+ *    - school
+ *    - other
+ *
+ *  Response (unwrapped by apiClient):
+ *    {
+ *      locations: SavedLocation[]
+ *    }
+ * --------------------------------------------------
+ */
+meRouter.get(
+  "/locations",
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const authUser = req.user;
+    if (!authUser) {
+      return res
+        .status(401)
+        .json(fail("UNAUTHENTICATED", "Please log in to view locations."));
+    }
+
+    const userId = authUser.id;
+
+    try {
+      const result = await pool.query(
+        `
+        SELECT id, label, address
+        FROM saved_locations
+        WHERE user_id = $1
+          AND label IN ('home', 'work', 'school', 'other')
+        ORDER BY label ASC, id ASC
+        `,
+        [userId]
+      );
+
+      const locations: SavedLocation[] = result.rows.map((r: any) => ({
+        id: Number(r.id),
+        label: r.label as SavedLocationLabel,
+        address: String(r.address ?? "").trim(),
+      }));
+
+      return res.json(ok({ locations }));
+    } catch (err) {
+      console.error("Error in GET /me/locations:", err);
+      return res
+        .status(500)
+        .json(fail("LOCATIONS_FETCH_FAILED", "Failed to load locations."));
+    }
+  }
+);
+
+/**
+ * --------------------------------------------------
+ *  POST /me/locations
+ *  Create or update a saved location by label.
+ *
+ *  Body:
+ *    {
+ *      label: "home" | "work" | "school" | "other";
+ *      address: string;
+ *    }
+ *
+ *  Behaviour:
+ *    - If row exists for (user_id, label) → UPDATE address
+ *    - Else → INSERT new row
+ * --------------------------------------------------
+ */
+meRouter.post(
+  "/locations",
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const authUser = req.user;
+    if (!authUser) {
+      return res
+        .status(401)
+        .json(fail("UNAUTHENTICATED", "Please log in to save locations."));
+    }
+
+    const userId = authUser.id;
+    const body = (req.body || {}) as Partial<SaveLocationBody>;
+
+    const label = body.label;
+    const addressRaw = body.address;
+
+    if (
+      label !== "home" &&
+      label !== "work" &&
+      label !== "school" &&
+      label !== "other"
+    ) {
+      return res
+        .status(400)
+        .json(
+          fail(
+            "INVALID_LABEL",
+            "Label must be one of: home, work, school, other."
+          )
+        );
+    }
+
+    const address = (addressRaw || "").trim();
+    if (!address) {
+      return res
+        .status(400)
+        .json(
+          fail(
+            "INVALID_ADDRESS",
+            "Address is required to save a location."
+          )
+        );
+    }
+
+    try {
+      // Check if a location already exists for this (user, label)
+      const existing = await pool.query(
+        `
+        SELECT id
+        FROM saved_locations
+        WHERE user_id = $1 AND label = $2
+        LIMIT 1
+        `,
+        [userId, label]
+      );
+
+      let saved: SavedLocation;
+
+      if (existing.rowCount && existing.rows.length > 0) {
+        const id = existing.rows[0].id;
+
+        await pool.query(
+          `
+          UPDATE saved_locations
+          SET address = $1
+          WHERE id = $2
+          `,
+          [address, id]
+        );
+
+        saved = {
+          id: Number(id),
+          label,
+          address,
+        };
+      } else {
+        const insertRes = await pool.query(
+          `
+          INSERT INTO saved_locations (user_id, label, address)
+          VALUES ($1, $2, $3)
+          RETURNING id, label, address
+          `,
+          [userId, label, address]
+        );
+
+        const row = insertRes.rows[0];
+        saved = {
+          id: Number(row.id),
+          label: row.label as SavedLocationLabel,
+          address: String(row.address ?? "").trim(),
+        };
+      }
+
+      return res.json(ok({ location: saved }));
+    } catch (err) {
+      console.error("Error in POST /me/locations:", err);
+      return res
+        .status(500)
+        .json(
+          fail(
+            "LOCATION_SAVE_FAILED",
+            "Failed to save this location. Please try again."
+          )
+        );
+    }
+  }
+);
+
+/**
+ * --------------------------------------------------
  *  GET /me/setup
  *  Simple onboarding flags.
  *
@@ -251,7 +452,9 @@ meRouter.post(
  */
 
 // Helper to satisfy TypeScript for rowCount (number | null)
-function hasAnyRows(result: { rowCount: number | null } | null | undefined): boolean {
+function hasAnyRows(
+  result: { rowCount: number | null } | null | undefined
+): boolean {
   return !!result && typeof result.rowCount === "number" && result.rowCount > 0;
 }
 
