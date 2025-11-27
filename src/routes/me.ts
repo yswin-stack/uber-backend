@@ -459,7 +459,7 @@ meRouter.post(
  *    { maxRides?: number }
  *  If provided, this caps how many rides we generate.
  *  Otherwise we try to infer from credits.
- * --------------------------------------------------
+  * --------------------------------------------------
  */
 meRouter.post(
   "/schedule/generate-rides",
