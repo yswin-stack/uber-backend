@@ -237,6 +237,12 @@ meRouter.post(
   }
 );
 
+// Helper to satisfy TS: rowCount can be number | null, so we guard it.
+function hasAnyRows(result: any): boolean {
+  return !!result && typeof result.rowCount === "number" && result.rowCount > 0;
+}
+
+
 /**
  * --------------------------------------------------
  *  GET /me/setup
