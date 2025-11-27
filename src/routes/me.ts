@@ -459,7 +459,7 @@ meRouter.post(
  *    { maxRides?: number }
  *  If provided, this caps how many rides we generate.
  *  Otherwise we try to infer from credits.
-  * --------------------------------------------------
+ * --------------------------------------------------
  */
 meRouter.post(
   "/schedule/generate-rides",
@@ -697,7 +697,7 @@ meRouter.post(
           remainingCredits: ridesRemaining,
         })
       );
-      } catch (err: any) {
+    } catch (err: any) {
       console.error("Error in POST /me/schedule/generate-rides:", err);
       try {
         await pool.query("ROLLBACK");
@@ -708,7 +708,6 @@ meRouter.post(
         );
       }
 
-      // 🔥 IMPORTANT: surface the real error message so we can see what’s wrong
       const message =
         err && typeof err === "object" && "message" in err && err.message
           ? String(err.message)
@@ -718,6 +717,8 @@ meRouter.post(
         .status(500)
         .json(fail("GENERATE_RIDES_FAILED", message));
     }
+  }
+);
 
 /**
  * --------------------------------------------------
