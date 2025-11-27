@@ -33,7 +33,7 @@ meRouter.get("/credits", requireAuth, async (req: Request, res: Response) => {
 
 /**
  * Type used by the schedule page on the frontend.
- * We match what app/schedule/page.ts expects.
+ * We match what app/schedule/page.tsx expects.
  */
 type BackendScheduleRow = {
   day_of_week: number;
@@ -367,10 +367,7 @@ meRouter.post(
       return res
         .status(400)
         .json(
-          fail(
-            "INVALID_ADDRESS",
-            "Address is required to save a location."
-          )
+          fail("INVALID_ADDRESS", "Address is required to save a location.")
         );
     }
 
@@ -432,6 +429,141 @@ meRouter.post(
           fail(
             "LOCATION_SAVE_FAILED",
             "Failed to save this location. Please try again."
+          )
+        );
+    }
+  }
+);
+
+/**
+ * --------------------------------------------------
+ *  POST /me/rides/:rideId/cancel
+ *  Allow rider to cancel own ride, but only up to
+ *  15 minutes before pickup_time.
+ *
+ *  Response:
+ *    { id: number; status: string }
+ * --------------------------------------------------
+ */
+meRouter.post(
+  "/rides/:rideId/cancel",
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const authUser = req.user;
+    if (!authUser) {
+      return res
+        .status(401)
+        .json(fail("UNAUTHENTICATED", "Please log in to cancel a ride."));
+    }
+
+    const rideId = Number(req.params.rideId);
+    if (!Number.isInteger(rideId) || rideId <= 0) {
+      return res
+        .status(400)
+        .json(fail("INVALID_RIDE_ID", "Ride id must be a positive integer."));
+    }
+
+    try {
+      // Fetch ride for this user
+      const rideRes = await pool.query(
+        `
+        SELECT id, rider_id, pickup_time, status
+        FROM rides
+        WHERE id = $1 AND rider_id = $2
+        LIMIT 1
+        `,
+        [rideId, authUser.id]
+      );
+
+      if (!rideRes.rowCount || rideRes.rows.length === 0) {
+        return res
+          .status(404)
+          .json(fail("RIDE_NOT_FOUND", "Ride not found for this user."));
+      }
+
+      const ride = rideRes.rows[0] as {
+        id: number;
+        rider_id: number;
+        pickup_time: string | null;
+        status: string;
+      };
+
+      if (!ride.pickup_time) {
+        return res
+          .status(400)
+          .json(
+            fail(
+              "NO_PICKUP_TIME",
+              "This ride cannot be cancelled right now."
+            )
+          );
+      }
+
+      const pickup = new Date(ride.pickup_time);
+      if (Number.isNaN(pickup.getTime())) {
+        return res
+          .status(400)
+          .json(
+            fail(
+              "INVALID_PICKUP_TIME",
+              "This ride has an invalid pickup time."
+            )
+          );
+      }
+
+      const now = new Date();
+      const diffMinutes = (pickup.getTime() - now.getTime()) / 60000;
+
+      if (diffMinutes < 15) {
+        return res.status(400).json(
+          fail(
+            "CANCEL_WINDOW_PASSED",
+            "Rides can only be cancelled up to 15 minutes before pickup."
+          )
+        );
+      }
+
+      // Optional: block cancelling once already completed/cancelled
+      if (
+        ride.status === "completed" ||
+        ride.status === "cancelled" ||
+        ride.status === "cancelled_by_user" ||
+        ride.status === "cancelled_by_admin" ||
+        ride.status === "no_show"
+      ) {
+        return res
+          .status(400)
+          .json(
+            fail(
+              "CANNOT_CANCEL",
+              "This ride can no longer be cancelled."
+            )
+          );
+      }
+
+      await pool.query(
+        `
+        UPDATE rides
+        SET status = 'cancelled_by_user'
+        WHERE id = $1
+        `,
+        [rideId]
+      );
+
+      return res.json(
+        ok({
+          id: rideId,
+          status: "cancelled_by_user",
+        })
+      );
+    } catch (err) {
+      console.error("Error in POST /me/rides/:rideId/cancel:", err);
+      return res
+        .status(500)
+        .json(
+          fail(
+            "CANCEL_FAILED",
+            "Failed to cancel this ride. Please try again."
           )
         );
     }
