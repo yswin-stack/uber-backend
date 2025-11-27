@@ -249,6 +249,11 @@ meRouter.post(
  *  }
  * --------------------------------------------------
  */
+function hasAnyRows(result: any): boolean {
+  return !!result && typeof result.rowCount === "number" && result.rowCount > 0;
+}
+
+
 meRouter.get("/setup", requireAuth, async (req: Request, res: Response) => {
   const authUser = req.user;
   if (!authUser) {
