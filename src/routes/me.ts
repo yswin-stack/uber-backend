@@ -237,12 +237,6 @@ meRouter.post(
   }
 );
 
-// Helper to satisfy TS: rowCount can be number | null, so we guard it.
-function hasAnyRows(result: any): boolean {
-  return !!result && typeof result.rowCount === "number" && result.rowCount > 0;
-}
-
-
 /**
  * --------------------------------------------------
  *  GET /me/setup
@@ -255,10 +249,11 @@ function hasAnyRows(result: any): boolean {
  *  }
  * --------------------------------------------------
  */
-function hasAnyRows(result: any): boolean {
+
+// Helper to satisfy TypeScript for rowCount (number | null)
+function hasAnyRows(result: { rowCount: number | null } | null | undefined): boolean {
   return !!result && typeof result.rowCount === "number" && result.rowCount > 0;
 }
-
 
 meRouter.get("/setup", requireAuth, async (req: Request, res: Response) => {
   const authUser = req.user;
@@ -301,9 +296,9 @@ meRouter.get("/setup", requireAuth, async (req: Request, res: Response) => {
       ),
     ]);
 
-    const has_home = homeRes.rowCount > 0;
-    const has_work = workRes.rowCount > 0;
-    const has_schedule = scheduleRes.rowCount > 0;
+    const has_home = hasAnyRows(homeRes);
+    const has_work = hasAnyRows(workRes);
+    const has_schedule = hasAnyRows(scheduleRes);
 
     return res.json(
       ok({
