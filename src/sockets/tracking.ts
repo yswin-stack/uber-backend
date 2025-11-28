@@ -1,203 +1,160 @@
 import { Server, Socket } from "socket.io";
-import jwt from "jsonwebtoken";
 import { pool } from "../db/pool";
-import { computeDistanceKm } from "../utils/distance";
-import { getAiConfig } from "../services/aiConfig";
-import type { RideStatus } from "../shared/types";
+import { recordEtaUpdate, clearProximityStateForRide } from "../services/rideProximity";
 
-interface DriverLocationPayload {
+/**
+ * A simple payload type for driver location updates.
+ */
+type LocationUpdatePayload = {
   rideId: number;
   lat: number;
   lng: number;
-}
+};
 
-interface JwtPayload {
-  id: number;
-  role: string;
-  phone?: string | null;
-}
+/**
+ * Statuses where it makes sense to track driver location
+ * and show it to riders.
+ */
+const TRACKABLE_STATUSES = [
+  "driver_en_route",
+  "arrived",
+  "in_progress",
+];
 
-interface AuthedSocket extends Socket {
-  data: {
-    userId?: number;
-    role?: string;
+/**
+ * Fetch the minimal information we need for a ride.
+ */
+async function getRideBasic(
+  rideId: number
+): Promise<{ id: number; user_id: number; status: string; pickup_time: string } | null> {
+  const res = await pool.query(
+    `
+    SELECT id, user_id, status, pickup_time
+    FROM rides
+    WHERE id = $1
+    LIMIT 1
+    `,
+    [rideId]
+  );
+
+  if (!res.rowCount) return null;
+  const row = res.rows[0];
+  return {
+    id: row.id,
+    user_id: row.user_id,
+    status: row.status,
+    pickup_time: row.pickup_time,
   };
 }
 
-const JWT_SECRET = process.env.JWT_SECRET || "";
+/**
+ * Calculate a rough ETA in minutes based on scheduled pickup_time.
+ * Since we don't (yet) have driving distance calculations wired in,
+ * this is essentially "minutes until scheduled pickup".
+ */
+function calculateEtaMinutes(pickupTimeIso: string): number {
+  const now = Date.now();
+  const pickup = new Date(pickupTimeIso).getTime();
+  if (Number.isNaN(pickup)) return 0;
+  const diffMs = pickup - now;
+  const diffMin = Math.round(diffMs / 60000);
+  return Math.max(0, diffMin);
+}
 
-// Only allow tracking when ride is in one of these statuses
-const TRACKABLE_RIDE_STATUSES: RideStatus[] = ["driver_en_route", "in_progress"];
-
-// Fallback campus centre – used if we can't read a more precise destination.
-const CAMPUS_CENTER = { lat: 49.8075, lng: -97.1325 };
-
-export function setupTrackingSockets(io: Server) {
-  io.on("connection", (socket: AuthedSocket) => {
-    console.log("🔌 Socket connected:", socket.id);
-
-    // --- 1) Best-effort JWT auth for this socket (for drivers) ---
-    try {
-      const tokenFromAuth =
-        (socket.handshake.auth as any)?.token ||
-        (socket.handshake.headers?.authorization as string | undefined);
-
-      let token: string | null = null;
-
-      if (tokenFromAuth && tokenFromAuth.startsWith("Bearer ")) {
-        token = tokenFromAuth.slice("Bearer ".length);
-      } else if (tokenFromAuth) {
-        token = tokenFromAuth;
-      } else {
-        const queryToken = (socket.handshake.query as any)?.token;
-        if (typeof queryToken === "string" && queryToken) {
-          token = queryToken;
-        }
-      }
-
-      if (token && JWT_SECRET) {
-        const decoded = jwt.verify(token, JWT_SECRET) as JwtPayload;
-        if (decoded && typeof decoded.id === "number" && decoded.role) {
-          socket.data.userId = decoded.id;
-          socket.data.role = decoded.role;
-          console.log(
-            "✅ Socket authenticated:",
-            socket.id,
-            "user",
-            decoded.id,
-            "role",
-            decoded.role
-          );
-        }
-      }
-    } catch (err) {
-      console.warn("⚠️ Failed to authenticate socket:", err);
-    }
-
-    // --- 2) Riders join a room for a specific ride ---
-    socket.on("join_ride_room", (payload: { rideId: number } | number) => {
-      const rideId =
-        typeof payload === "number" ? payload : Number(payload?.rideId);
-      if (!rideId || Number.isNaN(rideId)) return;
+/**
+ * Attach tracking handlers to the main Socket.IO server.
+ * We keep this as a named export and also as default, so whichever
+ * style your server uses will still work.
+ */
+export function attachTrackingHandlers(io: Server) {
+  io.on("connection", (socket: Socket) => {
+    /**
+     * Rider or driver joins a ride-specific room.
+     * We keep the protocol simple: ride:ID rooms.
+     */
+    socket.on("join_ride_room", (payload: { rideId?: number }) => {
+      const rideId = payload?.rideId;
+      if (!rideId || Number.isNaN(Number(rideId))) return;
 
       const room = `ride:${rideId}`;
       socket.join(room);
-      console.log(`👥 Socket ${socket.id} joined room ${room}`);
     });
 
-    // Legacy name kept for backwards compatibility
-    socket.on("join_ride", (rideId: number) => {
-      if (!rideId || Number.isNaN(rideId)) return;
-      const room = `ride:${rideId}`;
-      socket.join(room);
-      console.log(`👥 Socket ${socket.id} joined room ${room} (legacy)`);
-    });
+    /**
+     * Driver sends location updates for a given ride.
+     * - We rebroadcast to the ride room (so rider(s) see marker move)
+     * - We emit a ride_eta_update event with a rough ETA
+     * - We trigger proximity notifications (5-min / arrival)
+     *   based on this ETA, without blocking the driver.
+     */
+    socket.on(
+      "location_update",
+      async (payload: LocationUpdatePayload) => {
+        try {
+          const rideId = Number(payload?.rideId);
+          if (!rideId || Number.isNaN(rideId)) return;
 
-    // --- 3) Driver sends live location updates ---
-    socket.on("location_update", async (payload: DriverLocationPayload) => {
-      const { rideId, lat, lng } = payload || ({} as DriverLocationPayload);
+          const ride = await getRideBasic(rideId);
+          if (!ride) {
+            return;
+          }
 
-      if (!rideId || Number.isNaN(rideId)) return;
-      if (typeof lat !== "number" || typeof lng !== "number") return;
+          // If the ride is no longer trackable, do not send updates to riders.
+          if (!TRACKABLE_STATUSES.includes(ride.status)) {
+            // If ride is finished/cancelled, clean proximity state so we don't
+            // accidentally reuse it if IDs get recycled in local dev.
+            if (
+              ride.status === "completed" ||
+              ride.status === "cancelled" ||
+              ride.status === "cancelled_by_user" ||
+              ride.status === "cancelled_by_admin" ||
+              ride.status === "no_show"
+            ) {
+              clearProximityStateForRide(rideId);
+            }
+            return;
+          }
 
-      const room = `ride:${rideId}`;
-      const nowIso = new Date().toISOString();
+          const room = `ride:${rideId}`;
+          const updatedAtIso = new Date().toISOString();
 
-      // Always emit location_update to riders – even if validation fails later.
-      const locationMessage = {
-        rideId,
-        lat,
-        lng,
-        updatedAt: nowIso,
-      };
-      io.to(room).emit("location_update", locationMessage);
-      console.log(`📍 location_update for ride ${rideId}:`, {
-        lat,
-        lng,
-        socket: socket.id,
-      });
+          // Broadcast live location to everyone in this ride room
+          io.to(room).emit("location_update", {
+            rideId,
+            lat: payload.lat,
+            lng: payload.lng,
+            updatedAt: updatedAtIso,
+          });
 
-      // Validate that this socket belongs to a driver/admin
-      const userId = socket.data.userId;
-      const role = socket.data.role;
-      if (!userId || !role || (role !== "driver" && role !== "admin")) {
-        console.warn(
-          "⚠️ location_update ignored: unauthenticated or non-driver socket",
-          socket.id
-        );
-        return;
-      }
+          // Calculate a rough ETA in minutes and broadcast it as well
+          const etaMinutes = calculateEtaMinutes(ride.pickup_time);
+          io.to(room).emit("ride_eta_update", {
+            etaMinutes,
+          });
 
-      try {
-        // Check that ride exists and is in a trackable status
-        const rideRes = await pool.query(
-          `
-          SELECT status
-          FROM rides
-          WHERE id = $1
-          `,
-          [rideId]
-        );
-
-        if (rideRes.rowCount === 0) {
-          console.warn(
-            "⚠️ location_update for unknown ride id:",
-            rideId
-          );
-          return;
+          // Trigger 5-min and "driver is here" SMS as needed
+          // (this function is best-effort and non-blocking from the driver's POV)
+          recordEtaUpdate({
+            rideId,
+            userId: ride.user_id,
+            etaMinutes,
+          }).catch((err) => {
+            console.error(
+              "[tracking] Failed to record ETA proximity event:",
+              err
+            );
+          });
+        } catch (err) {
+          console.error("Error processing location_update:", err);
         }
-
-        const status = (rideRes.rows[0].status || "pending") as RideStatus;
-
-        if (!TRACKABLE_RIDE_STATUSES.includes(status)) {
-          console.warn(
-            `⚠️ location_update ignored: ride ${rideId} in status ${status}`
-          );
-          return;
-        }
-
-        // Compute a simple ETA from driver's location to campus centre (fallback destination).
-        // Later we can swap to real pickup/dropoff coordinates.
-        const cfg = getAiConfig();
-        const distanceKm = computeDistanceKm(
-          lat,
-          lng,
-          CAMPUS_CENTER.lat,
-          CAMPUS_CENTER.lng
-        );
-
-        // Avoid division by zero
-        const effectiveSpeedKmh =
-          cfg.travel_speed_kmh && cfg.travel_speed_kmh > 0
-            ? cfg.travel_speed_kmh
-            : 25;
-
-        const etaMinutesFloat = (distanceKm / effectiveSpeedKmh) * 60;
-        const etaMinutes = Math.max(1, Math.round(etaMinutesFloat));
-
-        const etaDate = new Date();
-        etaDate.setMinutes(etaDate.getMinutes() + etaMinutes);
-
-        const etaMessage = {
-          rideId,
-          eta_minutes: etaMinutes,
-          eta_arrival_time: etaDate.toISOString(),
-        };
-
-        io.to(room).emit("ride_eta_update", etaMessage);
-        console.log("⏱ ride_eta_update:", etaMessage);
-      } catch (err) {
-        // Graceful fallback: we already emitted location_update; just log ETA failure.
-        console.error(
-          "❌ Failed to compute ETA/location validation for ride",
-          rideId,
-          err
-        );
       }
-    });
+    );
 
     socket.on("disconnect", () => {
-      console.log("❌ Socket disconnected:", socket.id);
+      // At the moment we don't need explicit cleanup per socket.
+      // Rooms and in-memory proximity state are keyed by ride, not socket.
     });
   });
 }
+
+export default attachTrackingHandlers;
