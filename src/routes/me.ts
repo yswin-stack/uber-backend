@@ -641,6 +641,44 @@ meRouter.post(
         return dt;
       }
 
+      // 🔧 Helper: insert ride using whatever user column exists (rider_id or user_id)
+      async function insertScheduledRide(
+        riderId: number,
+        pickup_location: string,
+        dropoff_location: string,
+        pickupTimeIso: string
+      ) {
+        try {
+          // First try with rider_id (newer schema)
+          await pool.query(
+            `
+            INSERT INTO rides (rider_id, pickup_location, dropoff_location, pickup_time, status)
+            VALUES ($1, $2, $3, $4, 'scheduled')
+            `,
+            [riderId, pickup_location, dropoff_location, pickupTimeIso]
+          );
+        } catch (err: any) {
+          // If the column rider_id doesn't exist, fall back to user_id (V1 schema)
+          if (
+            err &&
+            (err.code === "42703" || // undefined_column
+              (typeof err.message === "string" &&
+                err.message.includes("rider_id")))
+          ) {
+            await pool.query(
+              `
+              INSERT INTO rides (user_id, pickup_location, dropoff_location, pickup_time, status)
+              VALUES ($1, $2, $3, $4, 'scheduled')
+              `,
+              [riderId, pickup_location, dropoff_location, pickupTimeIso]
+            );
+          } else {
+            // Some other error: rethrow
+            throw err;
+          }
+        }
+      }
+
       let createdCount = 0;
 
       await pool.query("BEGIN");
@@ -674,12 +712,11 @@ meRouter.post(
             dropoff_location = homeAddress;
           }
 
-          await pool.query(
-            `
-            INSERT INTO rides (rider_id, pickup_location, dropoff_location, pickup_time, status)
-            VALUES ($1, $2, $3, $4, 'scheduled')
-            `,
-            [userId, pickup_location, dropoff_location, pickupTimeIso]
+          await insertScheduledRide(
+            userId,
+            pickup_location,
+            dropoff_location,
+            pickupTimeIso
           );
 
           ridesRemaining = (ridesRemaining ?? 0) - 1;
