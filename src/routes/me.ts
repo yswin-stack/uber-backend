@@ -1039,6 +1039,13 @@ meRouter.get(
         WHERE user_id = $1
           AND pickup_time >= $2
           AND pickup_time <= $3
+          AND status NOT IN (
+            'cancelled',
+            'cancelled_by_user',
+            'cancelled_by_admin',
+            'no_show',
+            'completed'
+          )
           AND status IN (
             'pending',
             'scheduled',
@@ -1162,6 +1169,80 @@ meRouter.post(
 
 /**
  * --------------------------------------------------
+ *  GET /me/rides/upcoming-with-windows
+ *  Returns upcoming rides for the logged-in user with pickup/arrival windows.
+ *  Filters out cancelled rides.
+ * --------------------------------------------------
+ */
+meRouter.get(
+  "/rides/upcoming-with-windows",
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const authUser = req.user;
+    if (!authUser) {
+      return res
+        .status(401)
+        .json(
+          fail(
+            "UNAUTHENTICATED",
+            "Please log in to view your upcoming rides."
+          )
+        );
+    }
+
+    const userId = authUser.id;
+    const now = new Date();
+
+    try {
+      const result = await pool.query(
+        `
+        SELECT
+          id,
+          user_id,
+          pickup_location,
+          dropoff_location,
+          pickup_time,
+          pickup_window_start,
+          pickup_window_end,
+          arrival_window_start,
+          arrival_window_end,
+          status,
+          ride_type,
+          notes,
+          created_at
+        FROM rides
+        WHERE user_id = $1
+          AND pickup_time >= $2
+          AND status NOT IN (
+            'cancelled',
+            'cancelled_by_user',
+            'cancelled_by_admin',
+            'no_show',
+            'completed'
+          )
+        ORDER BY pickup_time ASC
+        LIMIT 50
+        `,
+        [userId, now.toISOString()]
+      );
+
+      return res.json(ok(result.rows));
+    } catch (err) {
+      console.error("Error in GET /me/rides/upcoming-with-windows:", err);
+      return res
+        .status(500)
+        .json(
+          fail(
+            "UPCOMING_RIDES_FAILED",
+            "Failed to load your upcoming rides. Please try again."
+          )
+        );
+    }
+  }
+);
+
+/**
+ * --------------------------------------------------
  *  GET /me/setup
  *  Simple onboarding flags.
  *
@@ -1220,7 +1301,7 @@ meRouter.get("/setup", requireAuth, async (req: Request, res: Response) => {
       pool.query(
         `
         SELECT 1
-        FROM user_schedules
+        FROM user_weekly_schedule
         WHERE user_id = $1
         LIMIT 1
         `,
