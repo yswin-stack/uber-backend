@@ -34,3 +34,23 @@ CREATE TABLE IF NOT EXISTS rides (
 
 CREATE INDEX IF NOT EXISTS idx_rides_user_time
   ON rides (user_id, pickup_time);
+
+-- ---------------------------------------------------
+-- Ride feedback: rating, comment, optional tip.
+-- Each ride can have at most one feedback record.
+-- ---------------------------------------------------
+CREATE TABLE IF NOT EXISTS ride_feedback (
+  id SERIAL PRIMARY KEY,
+  ride_id INTEGER NOT NULL REFERENCES rides(id) ON DELETE CASCADE,
+  rider_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  rating INTEGER NOT NULL CHECK (rating >= 1 AND rating <= 5),
+  comment TEXT,
+  tip_cents INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- Future-ready: when we have multiple drivers, we can populate this:
+  driver_id INTEGER
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ride_feedback_ride
+  ON ride_feedback (ride_id);
+
