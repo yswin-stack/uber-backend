@@ -1,6 +1,10 @@
 import { Router, Request, Response } from "express";
 import { pool } from "../db/pool";
-import { sendRideStatusNotification } from "../services/notifications";
+import {
+  sendRideStatusNotification,
+  type RideStatusNotificationEvent,
+} from "../services/notifications";
+
 import { logEvent } from "../services/analytics";
 
 const driverRouter = Router();
