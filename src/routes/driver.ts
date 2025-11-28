@@ -626,4 +626,128 @@ driverRouter.post(
   }
 );
 
+/**
+ * --------------------------------------------------
+ *  GET /driver/reviews
+ *  Returns recent feedback for this driver, plus a summary.
+ *
+ *  Response shape (V1-style, NOT wrapped in { ok: true, data }):
+ *  {
+ *    ok: true;
+ *    summary: {
+ *      total_count: number;
+ *      average_rating: number;
+ *      total_tips_cents: number;
+ *    };
+ *    reviews: Array<{
+ *      id: number;
+ *      ride_id: number;
+ *      rating: number;
+ *      comment: string | null;
+ *      tip_cents: number | null;
+ *      created_at: string;
+ *      pickup_time: string | null;
+ *      pickup_location: string | null;
+ *      dropoff_location: string | null;
+ *      rider_name: string | null;
+ *    }>;
+ *  }
+ * --------------------------------------------------
+ */
+driverRouter.get(
+  "/reviews",
+  async (req: Request, res: Response) => {
+    const userId = getDriverUserId(req);
+    if (!userId) {
+      return res
+        .status(401)
+        .json({ ok: false, error: "Missing or invalid user." });
+    }
+
+    try {
+      // Reuse your existing helper — ensures user exists and is driver/admin
+      await ensureDriverOrAdmin(userId);
+    } catch (err: any) {
+      if (err.message === "user_not_found") {
+        return res
+          .status(404)
+          .json({ ok: false, error: "User not found." });
+      }
+      if (err.message === "forbidden") {
+        return res.status(403).json({
+          ok: false,
+          error: "Only drivers/admins can view reviews.",
+        });
+      }
+      console.error("Error in GET /driver/reviews auth:", err);
+      return res
+        .status(500)
+        .json({ ok: false, error: "Internal error while checking auth." });
+    }
+
+    try {
+      // Summary: number of reviews, avg rating, total tips
+      const summaryRes = await pool.query(
+        `
+        SELECT
+          COUNT(*)::int AS total_count,
+          COALESCE(AVG(f.rating), 0)::float AS average_rating,
+          COALESCE(SUM(f.tip_cents), 0)::int AS total_tips_cents
+        FROM ride_feedback f
+        JOIN rides r ON r.id = f.ride_id
+        WHERE r.driver_id = $1
+        `,
+        [userId]
+      );
+
+      const summaryRow =
+        summaryRes.rows[0] ?? {
+          total_count: 0,
+          average_rating: 0,
+          total_tips_cents: 0,
+        };
+
+      // Detailed list of latest reviews
+      const reviewsRes = await pool.query(
+        `
+        SELECT
+          f.id,
+          f.ride_id,
+          f.rating,
+          f.comment,
+          f.tip_cents,
+          f.created_at,
+          r.pickup_time,
+          r.pickup_location,
+          r.dropoff_location,
+          u.name AS rider_name
+        FROM ride_feedback f
+        JOIN rides r ON r.id = f.ride_id
+        JOIN users u ON u.id = f.rider_id
+        WHERE r.driver_id = $1
+        ORDER BY f.created_at DESC
+        LIMIT 50
+        `,
+        [userId]
+      );
+
+      return res.json({
+        ok: true,
+        summary: {
+          total_count: summaryRow.total_count,
+          average_rating: summaryRow.average_rating,
+          total_tips_cents: summaryRow.total_tips_cents,
+        },
+        reviews: reviewsRes.rows,
+      });
+    } catch (err) {
+      console.error("Error in GET /driver/reviews:", err);
+      return res
+        .status(500)
+        .json({ ok: false, error: "Failed to load driver reviews." });
+    }
+  }
+);
+
+
 export default driverRouter;
