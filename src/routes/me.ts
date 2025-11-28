@@ -642,6 +642,7 @@ meRouter.post(
       }
 
       // 🔧 Helper: insert ride using whatever user column exists (rider_id or user_id)
+      // and always set ride_type = 'standard' to satisfy NOT NULL constraint.
       async function insertScheduledRide(
         riderId: number,
         pickup_location: string,
@@ -652,8 +653,15 @@ meRouter.post(
           // First try with rider_id (newer schema)
           await pool.query(
             `
-            INSERT INTO rides (rider_id, pickup_location, dropoff_location, pickup_time, status)
-            VALUES ($1, $2, $3, $4, 'scheduled')
+            INSERT INTO rides (
+              rider_id,
+              pickup_location,
+              dropoff_location,
+              pickup_time,
+              status,
+              ride_type
+            )
+            VALUES ($1, $2, $3, $4, 'scheduled', 'standard')
             `,
             [riderId, pickup_location, dropoff_location, pickupTimeIso]
           );
@@ -667,8 +675,15 @@ meRouter.post(
           ) {
             await pool.query(
               `
-              INSERT INTO rides (user_id, pickup_location, dropoff_location, pickup_time, status)
-              VALUES ($1, $2, $3, $4, 'scheduled')
+              INSERT INTO rides (
+                user_id,
+                pickup_location,
+                dropoff_location,
+                pickup_time,
+                status,
+                ride_type
+              )
+              VALUES ($1, $2, $3, $4, 'scheduled', 'standard')
               `,
               [riderId, pickup_location, dropoff_location, pickupTimeIso]
             );
