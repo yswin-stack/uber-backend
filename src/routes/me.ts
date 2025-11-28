@@ -352,7 +352,7 @@ meRouter.get("/schedule", requireAuth, async (req: Request, res: Response) => {
         direction,
         arrival_time,
         active
-      FROM user_weekly_schedule
+    FROM user_schedules
       WHERE user_id = $1
       ORDER BY day_of_week ASC, direction ASC
       `,
@@ -431,8 +431,9 @@ meRouter.post(
 
       await client.query(
         `
-        DELETE FROM user_weekly_schedule
-        WHERE user_id = $1
+       DELETE FROM user_schedules
+WHERE user_id = $1
+
         `,
         [userId]
       );
@@ -440,14 +441,15 @@ meRouter.post(
       for (const row of body.rows) {
         await client.query(
           `
-          INSERT INTO user_weekly_schedule (
-            user_id,
-            day_of_week,
-            direction,
-            arrival_time,
-            active
-          )
-          VALUES ($1, $2, $3, $4, $5)
+       INSERT INTO user_schedules (
+  user_id,
+  day_of_week,
+  direction,
+  arrival_time,
+  active
+)
+VALUES ($1, $2, $3, $4, $5)
+
           `,
           [
             userId,
@@ -533,16 +535,8 @@ meRouter.post(
 
       const scheduleRes = await client.query(
         `
-        SELECT
-          id,
-          user_id,
-          day_of_week,
-          direction,
-          arrival_time,
-          active
-        FROM user_weekly_schedule
-        WHERE user_id = $1
-          AND active = true
+        FROM user_schedules
+
         ORDER BY day_of_week ASC, direction ASC
         `,
         [userId]
@@ -1357,5 +1351,82 @@ meRouter.get("/setup", requireAuth, async (req: Request, res: Response) => {
       );
   }
 });
+
+/**
+ * --------------------------------------------------
+ *  GET /me/rides/upcoming-with-windows
+ *  Returns all upcoming rides for the current user,
+ *  including pickup/arrival windows when available.
+ *
+ *  The frontend calls this and expects a plain array
+ *  of rides (unwrapped), but via apiClient so we
+ *  return ok([...]) using the shared ApiResponse shape.
+ * --------------------------------------------------
+ */
+meRouter.get(
+  "/rides/upcoming-with-windows",
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const authUser = req.user;
+    if (!authUser) {
+      return res
+        .status(401)
+        .json(
+          fail("UNAUTHENTICATED", "Please log in to view your rides.")
+        );
+    }
+
+    const userId = authUser.id;
+    const nowIso = new Date().toISOString();
+
+    try {
+      const result = await pool.query(
+        `
+        SELECT
+          id,
+          user_id,
+          pickup_location,
+          dropoff_location,
+          pickup_time,
+          pickup_window_start,
+          pickup_window_end,
+          arrival_window_start,
+          arrival_window_end,
+          status,
+          ride_type,
+          driver_id,
+          is_fixed,
+          created_at
+        FROM rides
+        WHERE user_id = $1
+          AND pickup_time >= $2
+          AND status NOT IN (
+            'cancelled',
+            'cancelled_by_user',
+            'cancelled_by_admin',
+            'cancelled_by_driver',
+            'no_show'
+          )
+        ORDER BY pickup_time ASC
+        `,
+        [userId, nowIso]
+      );
+
+      // apiClient.ts will unwrap { ok: true, data: [...] } -> [...]
+      return res.json(ok(result.rows));
+    } catch (err) {
+      console.error("Error in GET /me/rides/upcoming-with-windows:", err);
+      return res
+        .status(500)
+        .json(
+          fail(
+            "UPCOMING_RIDES_FAILED",
+            "Failed to load upcoming rides. Please try again."
+          )
+        );
+    }
+  }
+);
+
 
 export default meRouter;
