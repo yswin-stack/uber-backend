@@ -1,6 +1,9 @@
 import { Server, Socket } from "socket.io";
 import { pool } from "../db/pool";
-import { recordEtaUpdate, clearProximityStateForRide } from "../services/rideProximity";
+import {
+  recordEtaUpdate,
+  clearProximityStateForRide,
+} from "../services/rideProximity";
 
 /**
  * A simple payload type for driver location updates.
@@ -15,18 +18,19 @@ type LocationUpdatePayload = {
  * Statuses where it makes sense to track driver location
  * and show it to riders.
  */
-const TRACKABLE_STATUSES = [
-  "driver_en_route",
-  "arrived",
-  "in_progress",
-];
+const TRACKABLE_STATUSES = ["driver_en_route", "arrived", "in_progress"];
 
 /**
  * Fetch the minimal information we need for a ride.
  */
 async function getRideBasic(
   rideId: number
-): Promise<{ id: number; user_id: number; status: string; pickup_time: string } | null> {
+): Promise<{
+  id: number;
+  user_id: number;
+  status: string;
+  pickup_time: string;
+} | null> {
   const res = await pool.query(
     `
     SELECT id, user_id, status, pickup_time
@@ -63,8 +67,8 @@ function calculateEtaMinutes(pickupTimeIso: string): number {
 
 /**
  * Attach tracking handlers to the main Socket.IO server.
- * We keep this as a named export and also as default, so whichever
- * style your server uses will still work.
+ * This is the core implementation used by both the named
+ * and default exports.
  */
 export function attachTrackingHandlers(io: Server) {
   io.on("connection", (socket: Socket) => {
@@ -157,4 +161,19 @@ export function attachTrackingHandlers(io: Server) {
   });
 }
 
+/**
+ * Named export used by src/server.ts:
+ *   import { setupTrackingSockets } from "./sockets/tracking";
+ *
+ * We simply delegate to attachTrackingHandlers so we don't
+ * duplicate any logic.
+ */
+export function setupTrackingSockets(io: Server) {
+  attachTrackingHandlers(io);
+}
+
+/**
+ * Default export remains for any existing imports that use:
+ *   import setupTrackingSockets from "./sockets/tracking";
+ */
 export default attachTrackingHandlers;
