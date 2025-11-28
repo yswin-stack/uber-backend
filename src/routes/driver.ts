@@ -469,21 +469,23 @@ driverRouter.post(
         ]
       );
 
-      const updatedRide = updateRes.rows[0];
+          const updatedRide = updateRes.rows[0];
 
       await client.query("COMMIT");
 
-      await sendRideStatusNotification({
-        ride_id: rideId,
-        user_id: ride.user_id,
-        status,
-      });
+      await sendRideStatusNotification(
+        ride.user_id,
+        rideId,
+        status as RideStatusNotificationEvent,
+        ride.pickup_time
+      );
 
       await logEvent("driver_updated_ride_status", {
         driver_id: userId,
         ride_id: rideId,
         status,
       });
+
 
       return res.json({
         ok: true,
