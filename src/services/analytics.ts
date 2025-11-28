@@ -12,6 +12,7 @@ export type AnalyticsEventName =
   | "ride_rated";
 
 
+
 export interface AnalyticsEventPayload {
   [key: string]: unknown;
 }
