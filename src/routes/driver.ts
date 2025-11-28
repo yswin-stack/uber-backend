@@ -31,6 +31,14 @@ function getUserIdFromHeader(req: Request): number | null {
   const id = parseInt(h, 10);
   return Number.isNaN(id) ? null : id;
 }
+function getDriverUserId(req: Request): number | null {
+  const authUser = (req as any).user;
+  if (authUser && typeof authUser.id === "number") {
+    return authUser.id;
+  }
+  return getUserIdFromHeader(req);
+}
+
 
 async function ensureDriverOrAdmin(
   userId: number
