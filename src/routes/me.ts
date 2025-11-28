@@ -20,351 +20,163 @@ meRouter.get("/credits", requireAuth, async (req: Request, res: Response) => {
       .json(fail("UNAUTHENTICATED", "Please log in to view credits."));
   }
 
+  const userId = authUser.id;
+
   try {
-    const summary = await getCreditsSummaryForUser(authUser.id);
+    const summary = await getCreditsSummaryForUser(userId);
     return res.json(ok(summary));
   } catch (err) {
     console.error("Error in GET /me/credits:", err);
     return res
       .status(500)
-      .json(fail("CREDITS_FETCH_FAILED", "Failed to load credits summary."));
+      .json(
+        fail(
+          "CREDITS_FETCH_FAILED",
+          "Failed to load your credit summary. Please try again."
+        )
+      );
   }
 });
 
 /**
- * Type used by the schedule page on the frontend.
- * We match what app/schedule/page.tsx expects.
+ * --------------------------------------------------
+ *  GET /me/profile
+ *  Returns the logged-in user's basic profile info.
+ * --------------------------------------------------
  */
-type BackendScheduleRow = {
-  day_of_week: number;
-  kind: "to_work" | "from_work";
-  arrival_time: string; // "HH:MM:SS"
-  enabled?: boolean;
-};
+meRouter.get("/profile", requireAuth, async (req: Request, res: Response) => {
+  const authUser = req.user;
+  if (!authUser) {
+    return res
+      .status(401)
+      .json(fail("UNAUTHENTICATED", "Please log in to view your profile."));
+  }
+
+  const userId = authUser.id;
+
+  try {
+    const result = await pool.query(
+      `
+      SELECT
+        id,
+        name,
+        phone,
+        email,
+        role
+      FROM users
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [userId]
+    );
+
+    if (!result.rowCount) {
+      return res
+        .status(404)
+        .json(fail("USER_NOT_FOUND", "User profile not found."));
+    }
+
+    const row = result.rows[0];
+
+    return res.json(
+      ok({
+        id: row.id,
+        name: row.name,
+        phone: row.phone,
+        email: row.email,
+        role: row.role,
+      })
+    );
+  } catch (err) {
+    console.error("Error in GET /me/profile:", err);
+    return res
+      .status(500)
+      .json(
+        fail(
+          "PROFILE_FETCH_FAILED",
+          "Failed to load your profile. Please try again."
+        )
+      );
+  }
+});
 
 /**
- * Saved locations used by weekly template:
- *  - home
- *  - work
- *  - school
- *  - other
+ * --------------------------------------------------
+ *  Types for schedule & locations
+ * --------------------------------------------------
  */
 type SavedLocationLabel = "home" | "work" | "school" | "other";
 
 type SavedLocation = {
   id: number;
+  user_id: number;
   label: SavedLocationLabel;
   address: string;
-};
-
-// Body can be any string label, we map to SavedLocationLabel internally
-type SaveLocationBody = {
-  label: string;
-  address: string;
-};
-
-/**
- * Extra type: per-day origin/destination override
- * for schedule → generate-rides.
- */
-type ScheduleRouteOverride = {
-  day_of_week: number;
-  direction: "to_work" | "to_home";
-  origin_label?: SavedLocationLabel;
-  destination_label?: SavedLocationLabel;
+  created_at: string;
 };
 
 /**
  * --------------------------------------------------
- *  GET /me/schedule
- *  Returns weekly schedule rows for the logged-in user.
- *
- *  Response (unwrapped by apiClient):
- *    BackendScheduleRow[]
+ *  GET /me/locations
+ *  Returns saved locations for the logged-in user.
  * --------------------------------------------------
  */
-meRouter.get("/schedule", requireAuth, async (req: Request, res: Response) => {
+meRouter.get("/locations", requireAuth, async (req: Request, res: Response) => {
   const authUser = req.user;
   if (!authUser) {
     return res
       .status(401)
-      .json(fail("UNAUTHENTICATED", "Please log in to view your schedule."));
+      .json(fail("UNAUTHENTICATED", "Please log in to view locations."));
   }
+
+  const userId = authUser.id;
 
   try {
     const result = await pool.query(
       `
-      SELECT day_of_week, direction, arrival_time
-      FROM user_schedules
+      SELECT id, user_id, label, address, created_at
+      FROM saved_locations
       WHERE user_id = $1
-      ORDER BY day_of_week ASC, direction ASC
+      ORDER BY created_at ASC
       `,
-      [authUser.id]
+      [userId]
     );
 
-    const rows: BackendScheduleRow[] = result.rows.map((r: any) => {
-      const direction: string = r.direction;
-      const kind: "to_work" | "from_work" =
-        direction === "to_work" ? "to_work" : "from_work";
+    const locations: SavedLocation[] = result.rows.map((row) => ({
+      id: row.id,
+      user_id: row.user_id,
+      label: row.label,
+      address: row.address,
+      created_at: row.created_at,
+    }));
 
-      // arrival_time is TIME from Postgres -> ensure "HH:MM:SS"
-      let arrival = String(r.arrival_time ?? "").trim();
-      if (arrival.length === 5) {
-        // "HH:MM" -> "HH:MM:00"
-        arrival = `${arrival}:00`;
-      }
-
-      return {
-        day_of_week: Number(r.day_of_week),
-        kind,
-        arrival_time: arrival,
-        enabled: true,
-      };
-    });
-
-    // apiClient will unwrap ok(data) → rows
-    return res.json(ok(rows));
+    return res.json(ok({ locations }));
   } catch (err) {
-    console.error("Error in GET /me/schedule:", err);
+    console.error("Error in GET /me/locations:", err);
     return res
       .status(500)
-      .json(fail("SCHEDULE_FETCH_FAILED", "Failed to load weekly schedule."));
+      .json(
+        fail(
+          "LOCATIONS_FETCH_FAILED",
+          "Failed to load your locations. Please try again."
+        )
+      );
   }
 });
 
 /**
  * --------------------------------------------------
- *  POST /me/schedule
- *  Overwrites the user's weekly schedule template.
- *
- *  Request from frontend:
- *    { schedule: BackendScheduleRow[] }
- *
- *  Mapping:
- *    kind "to_work"   -> direction "to_work"
- *    kind "from_work" -> direction "to_home"
- *
- *  Only rows with enabled !== false and a valid time are saved.
- *  Disabled / empty rows are simply omitted (no row in DB for that slot).
- * --------------------------------------------------
- */
-meRouter.post(
-  "/schedule",
-  requireAuth,
-  async (req: Request, res: Response) => {
-    const authUser = req.user;
-    if (!authUser) {
-      return res
-        .status(401)
-        .json(fail("UNAUTHENTICATED", "Please log in to save your schedule."));
-    }
-
-    const userId = authUser.id;
-    const body = req.body || {};
-    const schedule = body.schedule as BackendScheduleRow[] | undefined;
-
-    if (!Array.isArray(schedule)) {
-      return res
-        .status(400)
-        .json(
-          fail(
-            "INVALID_SCHEDULE",
-            "Request body must include a 'schedule' array."
-          )
-        );
-    }
-
-    // Normalise + validate
-    const cleaned: {
-      day_of_week: number;
-      direction: "to_work" | "to_home";
-      arrival_time: string; // "HH:MM:SS"
-    }[] = [];
-
-    for (const row of schedule) {
-      if (!row) continue;
-
-      const day = Number(row.day_of_week);
-      if (!Number.isInteger(day) || day < 0 || day > 6) {
-        console.warn("Skipping invalid day_of_week in schedule row:", row);
-        continue;
-      }
-
-      const kind = row.kind;
-      if (kind !== "to_work" && kind !== "from_work") {
-        console.warn("Skipping invalid kind in schedule row:", row);
-        continue;
-      }
-
-      // If explicitly disabled, skip
-      if (row.enabled === false) {
-        continue;
-      }
-
-      let arrival = (row.arrival_time || "").trim();
-      if (!arrival) {
-        // No time selected = effectively disabled for that direction
-        continue;
-      }
-
-      // Normalise time into "HH:MM:SS"
-      if (/^\d{1,2}:\d{2}$/.test(arrival)) {
-        arrival = `${arrival}:00`;
-      } else if (!/^\d{1,2}:\d{2}:\d{2}$/.test(arrival)) {
-        console.warn("Skipping invalid arrival_time in schedule row:", row);
-        continue;
-      }
-
-      const direction: "to_work" | "to_home" =
-        kind === "to_work" ? "to_work" : "to_home";
-
-      cleaned.push({
-        day_of_week: day,
-        direction,
-        arrival_time: arrival,
-      });
-    }
-
-    try {
-      await pool.query("BEGIN");
-
-      // Clear existing schedule for this user
-      await pool.query(
-        `
-        DELETE FROM user_schedules
-        WHERE user_id = $1
-        `,
-        [userId]
-      );
-
-      // Insert new rows
-      for (const row of cleaned) {
-        await pool.query(
-          `
-          INSERT INTO user_schedules (user_id, day_of_week, direction, arrival_time)
-          VALUES ($1, $2, $3, $4)
-          `,
-          [userId, row.day_of_week, row.direction, row.arrival_time]
-        );
-      }
-
-      await pool.query("COMMIT");
-
-      return res.json(
-        ok({
-          saved: cleaned.length,
-        })
-      );
-    } catch (err) {
-      console.error("Error in POST /me/schedule:", err);
-      try {
-        await pool.query("ROLLBACK");
-      } catch (rollbackErr) {
-        console.error("Rollback error in POST /me/schedule:", rollbackErr);
-      }
-      return res
-        .status(500)
-        .json(fail("SCHEDULE_SAVE_FAILED", "Failed to save weekly schedule."));
-    }
-  }
-);
-
-/**
- * --------------------------------------------------
- *  GET /me/locations
- *  Returns saved locations for this user:
- *    - home
- *    - work
- *    - school
- *    - other
- *
- *  Response (unwrapped by apiClient):
- *    {
- *      locations: SavedLocation[]
- *    }
- * --------------------------------------------------
- */
-meRouter.get(
-  "/locations",
-  requireAuth,
-  async (req: Request, res: Response) => {
-    const authUser = req.user;
-    if (!authUser) {
-      return res
-        .status(401)
-        .json(fail("UNAUTHENTICATED", "Please log in to view locations."));
-    }
-
-    const userId = authUser.id;
-
-    try {
-      const result = await pool.query(
-        `
-        SELECT id, label, address
-        FROM saved_locations
-        WHERE user_id = $1
-          AND label IN ('home', 'work', 'school', 'other')
-        ORDER BY label ASC, id ASC
-        `,
-        [userId]
-      );
-
-      const locations: SavedLocation[] = result.rows.map((r: any) => ({
-        id: Number(r.id),
-        label: r.label as SavedLocationLabel,
-        address: String(r.address ?? "").trim(),
-      }));
-
-      return res.json(ok({ locations }));
-    } catch (err) {
-      console.error("Error in GET /me/locations:", err);
-      return res
-        .status(500)
-        .json(fail("LOCATIONS_FETCH_FAILED", "Failed to load locations."));
-    }
-  }
-);
-
-/**
- * Helper: normalise any label string into one of:
- *   "home" | "work" | "school" | "other"
- */
-function normaliseLocationLabel(raw: string | undefined): SavedLocationLabel {
-  const v = (raw || "").toString().toLowerCase().trim();
-
-  if (!v) return "other";
-  if (v.includes("home") || v === "house") return "home";
-  if (v.includes("work") || v.includes("office") || v.includes("job")) {
-    return "work";
-  }
-  if (
-    v.includes("school") ||
-    v.includes("campus") ||
-    v.includes("uni") ||
-    v.includes("university") ||
-    v.includes("college")
-  ) {
-    return "school";
-  }
-  if (v === "other") return "other";
-
-  return "other";
-}
-
-/**
- * --------------------------------------------------
  *  POST /me/locations
- *  Create or update a saved location by label.
+ *  Create or update a saved location for the user.
  *
  *  Body:
  *    {
- *      label: string;   // will be normalised to home/work/school/other
+ *      label: "home" | "work" | "school" | "other";
  *      address: string;
  *    }
  *
- *  Behaviour:
- *    - If row exists for (user_id, normalised_label) → UPDATE address
- *    - Else → INSERT new row
+ *  - If label already exists → updates that row.
+ *  - Otherwise → inserts new row.
  * --------------------------------------------------
  */
 meRouter.post(
@@ -379,23 +191,25 @@ meRouter.post(
     }
 
     const userId = authUser.id;
-    const body = (req.body || {}) as Partial<SaveLocationBody>;
 
-    const canonicalLabel: SavedLocationLabel = normaliseLocationLabel(
-      body.label
-    );
-    const address = (body.address || "").trim();
+    const { label, address } = req.body as {
+      label?: SavedLocationLabel;
+      address?: string;
+    };
 
-    if (!address) {
+    if (!label || !address || typeof address !== "string") {
       return res
         .status(400)
         .json(
-          fail("INVALID_ADDRESS", "Address is required to save a location.")
+          fail(
+            "INVALID_LOCATION_INPUT",
+            "Please provide a valid label and address."
+          )
         );
     }
 
     try {
-      // Check if a location already exists for this (user, canonicalLabel)
+      // Check if a row already exists for this user + label
       const existing = await pool.query(
         `
         SELECT id
@@ -403,7 +217,7 @@ meRouter.post(
         WHERE user_id = $1 AND label = $2
         LIMIT 1
         `,
-        [userId, canonicalLabel]
+        [userId, label]
       );
 
       let saved: SavedLocation;
@@ -420,26 +234,41 @@ meRouter.post(
           [address, id]
         );
 
+        const updated = await pool.query(
+          `
+          SELECT id, user_id, label, address, created_at
+          FROM saved_locations
+          WHERE id = $1
+          LIMIT 1
+          `,
+          [id]
+        );
+
+        const row = updated.rows[0];
         saved = {
-          id: Number(id),
-          label: canonicalLabel,
-          address,
+          id: row.id,
+          user_id: row.user_id,
+          label: row.label,
+          address: row.address,
+          created_at: row.created_at,
         };
       } else {
-        const insertRes = await pool.query(
+        const inserted = await pool.query(
           `
           INSERT INTO saved_locations (user_id, label, address)
           VALUES ($1, $2, $3)
-          RETURNING id, label, address
+          RETURNING id, user_id, label, address, created_at
           `,
-          [userId, canonicalLabel, address]
+          [userId, label, address]
         );
 
-        const row = insertRes.rows[0];
+        const row = inserted.rows[0];
         saved = {
-          id: Number(row.id),
-          label: row.label as SavedLocationLabel,
-          address: String(row.address ?? "").trim(),
+          id: row.id,
+          user_id: row.user_id,
+          label: row.label,
+          address: row.address,
+          created_at: row.created_at,
         };
       }
 
@@ -460,26 +289,200 @@ meRouter.post(
 
 /**
  * --------------------------------------------------
+ *  Types & helpers for weekly schedule
+ * --------------------------------------------------
+ */
+
+type WeeklyScheduleRow = {
+  id: number;
+  user_id: number;
+  day_of_week: number; // 1-7 (Mon-Sun)
+  direction: "to_work" | "to_home";
+  arrival_time: string; // "HH:MM:SS" (TIME)
+  active: boolean;
+};
+
+type WeeklyScheduleResponse = {
+  rows: WeeklyScheduleRow[];
+};
+
+type SaveScheduleBody = {
+  rows: {
+    day_of_week: number;
+    direction: "to_work" | "to_home";
+    arrival_time: string;
+    active: boolean;
+  }[];
+};
+
+/**
+ * Extra type: per-day origin/destination override
+ * for schedule → generate-rides.
+ */
+type ScheduleRouteOverride = {
+  day_of_week: number;
+  direction: "to_work" | "to_home";
+  origin_label?: SavedLocationLabel;
+  destination_label?: SavedLocationLabel;
+};
+
+/**
+ * --------------------------------------------------
+ *  GET /me/schedule
+ *  Returns weekly schedule rows for the logged-in user.
+ * --------------------------------------------------
+ */
+meRouter.get("/schedule", requireAuth, async (req: Request, res: Response) => {
+  const authUser = req.user;
+  if (!authUser) {
+    return res
+      .status(401)
+      .json(fail("UNAUTHENTICATED", "Please log in to view schedule."));
+  }
+
+  const userId = authUser.id;
+
+  try {
+    const result = await pool.query(
+      `
+      SELECT
+        id,
+        user_id,
+        day_of_week,
+        direction,
+        arrival_time,
+        active
+      FROM user_weekly_schedule
+      WHERE user_id = $1
+      ORDER BY day_of_week ASC, direction ASC
+      `,
+      [userId]
+    );
+
+    const rows: WeeklyScheduleRow[] = result.rows.map((row) => ({
+      id: row.id,
+      user_id: row.user_id,
+      day_of_week: row.day_of_week,
+      direction: row.direction,
+      arrival_time: row.arrival_time,
+      active: row.active,
+    }));
+
+    const response: WeeklyScheduleResponse = { rows };
+
+    return res.json(ok(response));
+  } catch (err) {
+    console.error("Error in GET /me/schedule:", err);
+    return res
+      .status(500)
+      .json(
+        fail(
+          "SCHEDULE_FETCH_FAILED",
+          "Failed to load your schedule. Please try again."
+        )
+      );
+  }
+});
+
+/**
+ * --------------------------------------------------
+ *  POST /me/schedule
+ *  Save/update weekly schedule for the user
+ * --------------------------------------------------
+ */
+meRouter.post(
+  "/schedule",
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const authUser = req.user;
+    if (!authUser) {
+      return res
+        .status(401)
+        .json(fail("UNAUTHENTICATED", "Please log in to save schedule."));
+    }
+
+    const userId = authUser.id;
+    const body = req.body as SaveScheduleBody;
+
+    if (
+      !body ||
+      !Array.isArray(body.rows) ||
+      body.rows.some(
+        (r) =>
+          typeof r.day_of_week !== "number" ||
+          !["to_work", "to_home"].includes(r.direction) ||
+          typeof r.arrival_time !== "string"
+      )
+    ) {
+      return res
+        .status(400)
+        .json(
+          fail(
+            "INVALID_SCHEDULE_INPUT",
+            "Invalid schedule payload. Please check your inputs."
+          )
+        );
+    }
+
+    const client = await pool.connect();
+
+    try {
+      await client.query("BEGIN");
+
+      await client.query(
+        `
+        DELETE FROM user_weekly_schedule
+        WHERE user_id = $1
+        `,
+        [userId]
+      );
+
+      for (const row of body.rows) {
+        await client.query(
+          `
+          INSERT INTO user_weekly_schedule (
+            user_id,
+            day_of_week,
+            direction,
+            arrival_time,
+            active
+          )
+          VALUES ($1, $2, $3, $4, $5)
+          `,
+          [
+            userId,
+            row.day_of_week,
+            row.direction,
+            row.arrival_time,
+            row.active,
+          ]
+        );
+      }
+
+      await client.query("COMMIT");
+
+      return res.json(ok({ success: true }));
+    } catch (err) {
+      await client.query("ROLLBACK");
+      console.error("Error in POST /me/schedule:", err);
+      return res
+        .status(500)
+        .json(
+          fail(
+            "SCHEDULE_SAVE_FAILED",
+            "Failed to save your schedule. Please try again."
+          )
+        );
+    } finally {
+      client.release();
+    }
+  }
+);
+
+/**
+ * --------------------------------------------------
  *  POST /me/schedule/generate-rides
- *
- *  Use the weekly schedule template + saved locations
- *  to generate real rides into the "rides" table,
- *  consuming standard ride credits.
- *
- *  Optional body:
- *    {
- *      maxRides?: number;
- *      routes?: {
- *        day_of_week: number;
- *        direction: "to_work" | "to_home";
- *        origin_label?: "home" | "work" | "school" | "other";
- *        destination_label?: "home" | "work" | "school" | "other";
- *      }[];
- *    }
- *
- *  If routes[] is provided, we use it to choose which saved
- *  location labels to use for each ride, otherwise we fall back
- *  to home ↔ work/school like before.
+ *  Generate upcoming rides from weekly schedule
  * --------------------------------------------------
  */
 meRouter.post(
@@ -494,524 +497,349 @@ meRouter.post(
     }
 
     const userId = authUser.id;
-    const body = (req.body || {}) as {
-      maxRides?: number;
+
+    const body = req.body as {
+      start_date?: string; // "YYYY-MM-DD"
+      end_date?: string; // "YYYY-MM-DD"
       routes?: ScheduleRouteOverride[];
     };
 
+    let startDate: Date;
+    let endDate: Date;
+
+    if (body.start_date && body.end_date) {
+      startDate = new Date(body.start_date);
+      endDate = new Date(body.end_date);
+    } else {
+      const now = new Date();
+      startDate = new Date(now);
+      startDate.setUTCHours(0, 0, 0, 0);
+      endDate = new Date(startDate);
+      endDate.setUTCDate(endDate.getUTCDate() + 14);
+    }
+
+    if (endDate <= startDate) {
+      return res
+        .status(400)
+        .json(
+          fail("INVALID_DATE_RANGE", "End date must be after the start date.")
+        );
+    }
+
+    const client = await pool.connect();
+
     try {
-      // 1) Load weekly schedule for this user
-      const scheduleRes = await pool.query(
+      await client.query("BEGIN");
+
+      const scheduleRes = await client.query(
         `
-        SELECT day_of_week, direction, arrival_time
-        FROM user_schedules
+        SELECT
+          id,
+          user_id,
+          day_of_week,
+          direction,
+          arrival_time,
+          active
+        FROM user_weekly_schedule
         WHERE user_id = $1
+          AND active = true
         ORDER BY day_of_week ASC, direction ASC
         `,
         [userId]
       );
 
-      if (!scheduleRes.rowCount || scheduleRes.rows.length === 0) {
-        return res.status(400).json(
-          fail(
-            "NO_SCHEDULE",
-            "You need to set up a weekly schedule before generating rides."
-          )
+      const scheduleRows = scheduleRes.rows as {
+        id: number;
+        user_id: number;
+        day_of_week: number;
+        direction: string;
+        arrival_time: string;
+        active: boolean;
+      }[];
+
+      if (!scheduleRows.length) {
+        await client.query("ROLLBACK");
+        return res.json(
+          ok({
+            generated: 0,
+            message: "No active schedule rows found.",
+          })
         );
       }
 
-      const scheduleRows = scheduleRes.rows.map((r: any) => ({
-        day_of_week: Number(r.day_of_week),
-        direction: String(r.direction) as "to_work" | "to_home",
-        arrival_time: String(r.arrival_time ?? "").trim(), // TIME
-      })) as {
-        day_of_week: number;
-        direction: "to_work" | "to_home";
-        arrival_time: string;
-      }[];
-
-      // 2) Optional per-day origin/destination overrides from body.routes
-      const routeOverrides = Array.isArray(body.routes)
-        ? (body.routes as ScheduleRouteOverride[])
-        : [];
-
-      const routeMap = new Map<string, ScheduleRouteOverride>();
-      for (const r of routeOverrides) {
-        if (
-          typeof r.day_of_week === "number" &&
-          (r.direction === "to_work" || r.direction === "to_home")
-        ) {
-          const key = `${r.day_of_week}:${r.direction}`;
-          routeMap.set(key, r);
-        }
-      }
-
-      // 3) Load saved locations (home, work, school, other)
-      const locRes = await pool.query(
+      const locationsRes = await client.query(
         `
-        SELECT label, address
+        SELECT id, user_id, label, address
         FROM saved_locations
         WHERE user_id = $1
-          AND label IN ('home', 'work', 'school', 'other')
         `,
         [userId]
       );
 
-      let homeAddress = "";
-      let workAddress = "";
-      let schoolAddress = "";
-      let otherAddress = "";
-
-      for (const row of locRes.rows as { label: string; address: string }[]) {
-        const label = row.label as SavedLocationLabel;
-        const addr = (row.address || "").trim();
-        if (label === "home") homeAddress = addr;
-        if (label === "work") workAddress = addr;
-        if (label === "school") schoolAddress = addr;
-        if (label === "other") otherAddress = addr;
+      const locationsByLabel: Record<string, string> = {};
+      for (const row of locationsRes.rows) {
+        locationsByLabel[row.label] = row.address;
       }
 
-      if (!homeAddress) {
-        return res.status(400).json(
-          fail(
-            "NO_HOME_LOCATION",
-            "Please set a home address before generating rides."
-          )
-        );
+      function getAddress(label: SavedLocationLabel): string | null {
+        return locationsByLabel[label] ?? null;
       }
 
-      // Legacy destination address (used if no overrides)
-      const defaultDestinationAddress = workAddress || schoolAddress;
-      if (!defaultDestinationAddress) {
-        return res.status(400).json(
-          fail(
-            "NO_WORK_LOCATION",
-            "Please set a work or school address before generating rides."
-          )
-        );
-      }
+      function getDefaultOriginAndDestination(
+        direction: "to_work" | "to_home"
+      ): { origin: string | null; destination: string | null } {
+        const home = getAddress("home");
+        const work = getAddress("work") ?? getAddress("school");
 
-      // Helper: map label -> actual address string
-      function addressForLabel(label: SavedLocationLabel): string {
-        switch (label) {
-          case "home":
-            return homeAddress;
-          case "work":
-            return workAddress;
-          case "school":
-            return schoolAddress;
-          case "other":
-            return otherAddress;
-          default:
-            return "";
+        if (!home || !work) {
+          return { origin: null, destination: null };
         }
+
+        if (direction === "to_work") {
+          return { origin: home, destination: work };
+        }
+
+        return { origin: work, destination: home };
       }
 
-      // 4) Determine how many rides we are allowed to generate
-      let ridesRemaining: number | null = null;
-      let creditsLoaded = false;
+      const scheduleOverrides = Array.isArray(body.routes)
+        ? (body.routes as ScheduleRouteOverride[])
+        : [];
 
-      // a) If caller passes an explicit maxRides, we respect that first
-      if (typeof body.maxRides === "number" && body.maxRides > 0) {
-        ridesRemaining = body.maxRides;
+      const routeOverrideMap = new Map<string, ScheduleRouteOverride>();
+      for (const r of scheduleOverrides) {
+        const key = `${r.day_of_week}-${r.direction}`;
+        routeOverrideMap.set(key, r);
       }
 
-      // b) Otherwise, try to infer from credits summary
-      if (ridesRemaining === null) {
-        try {
-          const credits: any = await getCreditsSummaryForUser(userId);
+      function getRouteFor(
+        dayOfWeek: number,
+        direction: "to_work" | "to_home"
+      ): { origin: string | null; destination: string | null } {
+        const key = `${dayOfWeek}-${direction}`;
+        const override = routeOverrideMap.get(key);
 
-          const candidates: (number | undefined)[] = [
-            credits?.standardRidesRemaining,
-            credits?.standard_rides_remaining,
-            credits?.standard?.remaining,
-            credits?.standard?.ridesRemaining,
-          ];
-
-          const numeric = candidates.filter(
-            (v) => typeof v === "number" && !Number.isNaN(v)
-          ) as number[];
-
-          if (numeric.length > 0) {
-            ridesRemaining = numeric[0];
-            creditsLoaded = true;
-          }
-        } catch (err) {
-          console.warn(
-            "Failed to load credits summary inside /me/schedule/generate-rides:",
-            err
+        if (override) {
+          const originLabel = override.origin_label ?? "home";
+          const destinationLabel = override.destination_label ?? "work";
+          const originAddress = getAddress(originLabel as SavedLocationLabel);
+          const destinationAddress = getAddress(
+            destinationLabel as SavedLocationLabel
           );
-        }
-      }
-
-      // c) If we *still* don't have anything, fall back to a safe default
-      if (ridesRemaining === null || ridesRemaining <= 0) {
-        if (!creditsLoaded) {
-          // we don't actually know the real credit count, so assume 40 for now
-          ridesRemaining = 40;
-        }
-      }
-
-      // If we DID load credits and they say 0 or negative, respect that
-      if (creditsLoaded && (ridesRemaining === null || ridesRemaining <= 0)) {
-        return res.status(400).json(
-          fail(
-            "NO_CREDITS",
-            "You don't have any standard rides available to generate."
-          )
-        );
-      }
-
-      // 5) Generate rides from today forward (e.g. next 60 days)
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-
-      const horizon = new Date(today);
-      horizon.setDate(horizon.getDate() + 60); // 60-day horizon
-
-      function getScheduleForDow(dow: number) {
-        return scheduleRows.filter((row) => row.day_of_week === dow);
-      }
-
-      function buildDateTime(base: Date, timeStr: string): Date | null {
-        const clean = timeStr.trim();
-        if (!clean) return null;
-
-        const parts = clean.split(":");
-        if (parts.length < 2) return null;
-
-        const hh = Number(parts[0]);
-        const mm = Number(parts[1]);
-
-        if (
-          Number.isNaN(hh) ||
-          Number.isNaN(mm) ||
-          hh < 0 ||
-          hh > 23 ||
-          mm < 0 ||
-          mm > 59
-        ) {
-          return null;
+          return {
+            origin: originAddress ?? null,
+            destination: destinationAddress ?? null,
+          };
         }
 
-        const dt = new Date(base);
-        dt.setHours(hh, mm, 0, 0);
-        return dt;
+        return getDefaultOriginAndDestination(direction);
       }
 
-      // 🔧 Helper: insert ride using whatever user column exists (rider_id or user_id)
-      // and always set ride_type = 'standard' to satisfy NOT NULL constraint.
-      async function insertScheduledRide(
-        riderId: number,
-        pickup_location: string,
-        dropoff_location: string,
-        pickupTimeIso: string
+      const dayMs = 24 * 60 * 60 * 1000;
+      const scheduleByDay = new Map<number, WeeklyScheduleRow[]>();
+
+      for (const r of scheduleRows) {
+        const day = Number(r.day_of_week);
+        if (!scheduleByDay.has(day)) {
+          scheduleByDay.set(day, []);
+        }
+
+        const list = scheduleByDay.get(day)!;
+
+        const direction: string = r.direction;
+        const kind: "to_work" | "from_work" =
+          direction === "to_work" ? "to_work" : "from_work";
+
+        let arrival = String(r.arrival_time ?? "").trim();
+        if (arrival.length === 5) {
+          arrival = `${arrival}:00`;
+        }
+
+        list.push({
+          id: r.id,
+          user_id: r.user_id,
+          day_of_week: day,
+          direction: direction as "to_work" | "to_home",
+          arrival_time: arrival,
+          active: r.active,
+        });
+      }
+
+      let generatedCount = 0;
+      let deletedCount = 0;
+
+      const deleteRes = await client.query(
+        `
+        DELETE FROM rides
+        WHERE user_id = $1
+          AND pickup_time >= $2
+          AND pickup_time < $3
+          AND is_fixed = true
+        `,
+        [userId, startDate.toISOString(), endDate.toISOString()]
+      );
+
+      deletedCount = deleteRes.rowCount ?? 0;
+
+      for (
+        let t = startDate.getTime();
+        t < endDate.getTime();
+        t += dayMs
       ) {
-        try {
-          // First try with rider_id (newer schema)
-          await pool.query(
+        const d = new Date(t);
+        const dayOfWeek = d.getUTCDay() === 0 ? 7 : d.getUTCDay();
+
+        const daySchedule = scheduleByDay.get(dayOfWeek);
+        if (!daySchedule || daySchedule.length === 0) {
+          continue;
+        }
+
+        for (const row of daySchedule) {
+          const [h, m] = row.arrival_time.split(":");
+          const arrivalDate = new Date(d);
+          arrivalDate.setUTCHours(Number(h), Number(m), 0, 0);
+
+          let pickupDate = new Date(arrivalDate);
+          if (row.direction === "to_work") {
+            pickupDate = new Date(arrivalDate.getTime() - 30 * 60000);
+          } else {
+            pickupDate = new Date(arrivalDate.getTime());
+          }
+
+          const route = getRouteFor(
+            row.day_of_week,
+            row.direction as "to_work" | "to_home"
+          );
+          if (!route.origin || !route.destination) {
+            console.warn(
+              "Skipping ride generation due to missing origin/destination:",
+              {
+                userId,
+                dayOfWeek,
+                direction: row.direction,
+                route,
+              }
+            );
+            continue;
+          }
+
+          await client.query(
             `
             INSERT INTO rides (
-              rider_id,
+              user_id,
               pickup_location,
               dropoff_location,
               pickup_time,
-              status,
-              ride_type
+              ride_type,
+              is_fixed,
+              status
             )
-            VALUES ($1, $2, $3, $4, 'scheduled', 'standard')
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             `,
-            [riderId, pickup_location, dropoff_location, pickupTimeIso]
+            [
+              userId,
+              route.origin,
+              route.destination,
+              pickupDate.toISOString(),
+              "standard",
+              true,
+              "scheduled",
+            ]
           );
-        } catch (err: any) {
-          // Duplicate? Treat as no-op (idempotent generate)
-          if (err && err.code === "23505") {
-            return;
-          }
 
-          // If the column rider_id doesn't exist, fall back to user_id (V1 schema)
-          if (
-            err &&
-            (err.code === "42703" ||
-              (typeof err.message === "string" &&
-                err.message.includes("rider_id")))
-          ) {
-            try {
-              await pool.query(
-                `
-                INSERT INTO rides (
-                  user_id,
-                  pickup_location,
-                  dropoff_location,
-                  pickup_time,
-                  status,
-                  ride_type
-                )
-                VALUES ($1, $2, $3, $4, 'scheduled', 'standard')
-                `,
-                [riderId, pickup_location, dropoff_location, pickupTimeIso]
-              );
-            } catch (err2: any) {
-              // Duplicate on user_id schema → also treat as no-op
-              if (err2 && err2.code === "23505") {
-                return;
-              }
-              throw err2;
-            }
-          } else {
-            // Some other error: rethrow
-            throw err;
-          }
+          generatedCount += 1;
         }
       }
 
-      let createdCount = 0;
-
-      await pool.query("BEGIN");
-
-      for (
-        let cursor = new Date(today);
-        cursor <= horizon && (ridesRemaining ?? 0) > 0;
-        cursor.setDate(cursor.getDate() + 1)
-      ) {
-        const dow = cursor.getDay(); // 0=Sunday ... 6=Saturday
-        const rowsForDay = getScheduleForDow(dow);
-
-        if (!rowsForDay.length) continue;
-
-        for (const row of rowsForDay) {
-          if ((ridesRemaining ?? 0) <= 0) break;
-
-          const dt = buildDateTime(cursor, row.arrival_time);
-          if (!dt) continue;
-
-          const pickupTimeIso = dt.toISOString();
-
-          // Decide origin/destination labels for this row
-          const key = `${row.day_of_week}:${row.direction}`;
-          const override = routeMap.get(key);
-
-          let originLabel: SavedLocationLabel;
-          let destinationLabel: SavedLocationLabel;
-
-          if (override && override.origin_label && override.destination_label) {
-            originLabel = override.origin_label;
-            destinationLabel = override.destination_label;
-          } else {
-            // Legacy mapping: home ↔ work/school
-            if (row.direction === "to_work") {
-              originLabel = "home";
-              // prefer work/school
-              destinationLabel = workAddress
-                ? "work"
-                : schoolAddress
-                ? "school"
-                : "home";
-            } else {
-              // to_home
-              destinationLabel = "home";
-              originLabel = workAddress
-                ? "work"
-                : schoolAddress
-                ? "school"
-                : "home";
-            }
-          }
-
-          const pickup_location = addressForLabel(originLabel);
-          const dropoff_location = addressForLabel(destinationLabel);
-
-          if (!pickup_location || !dropoff_location) {
-            // If a label was chosen but no address exists → fail clearly.
-            await pool.query("ROLLBACK");
-            return res.status(400).json(
-              fail(
-                "MISSING_LOCATION_ADDRESS",
-                "One of your chosen locations does not have an address saved. Please set your home/work/school/other addresses and try again."
-              )
-            );
-          }
-
-          await insertScheduledRide(
-            userId,
-            pickup_location,
-            dropoff_location,
-            pickupTimeIso
-          );
-
-          ridesRemaining = (ridesRemaining ?? 0) - 1;
-          createdCount += 1;
-
-          if ((ridesRemaining ?? 0) <= 0) break;
-        }
-      }
-
-      await pool.query("COMMIT");
+      await client.query("COMMIT");
 
       return res.json(
         ok({
-          created: createdCount,
-          remainingCredits: ridesRemaining,
+          generated: generatedCount,
+          deleted: deletedCount,
         })
       );
-    } catch (err: any) {
+    } catch (err) {
+      await client.query("ROLLBACK");
       console.error("Error in POST /me/schedule/generate-rides:", err);
-      try {
-        await pool.query("ROLLBACK");
-      } catch (rollbackErr) {
-        console.error(
-          "Rollback error in POST /me/schedule/generate-rides:",
-          rollbackErr
-        );
-      }
-
-      const message =
-        err && typeof err === "object" && "message" in err && err.message
-          ? String(err.message)
-          : "Failed to generate rides from your schedule.";
-
       return res
         .status(500)
-        .json(fail("GENERATE_RIDES_FAILED", message));
+        .json(
+          fail(
+            "GENERATE_RIDES_FAILED",
+            "Failed to generate rides from your schedule."
+          )
+        );
+    } finally {
+      client.release();
     }
   }
 );
 
 /**
  * --------------------------------------------------
- *  POST /me/rides/:rideId/cancel
- *  Allow rider to cancel own ride, but only up to
- *  15 minutes before pickup_time.
- *
- *  Works with both schemas:
- *    - rides(rider_id, ...)
- *    - rides(user_id, ...)
- *
- *  Response:
- *    { id: number; status: string }
+ *  POST /me/rides/:id/cancel
+ *  Cancel a scheduled/confirmed ride for the current user.
  * --------------------------------------------------
  */
 meRouter.post(
-  "/rides/:rideId/cancel",
+  "/rides/:id/cancel",
   requireAuth,
   async (req: Request, res: Response) => {
     const authUser = req.user;
     if (!authUser) {
       return res
         .status(401)
-        .json(fail("UNAUTHENTICATED", "Please log in to cancel a ride."));
+        .json(fail("UNAUTHENTICATED", "Please log in to cancel rides."));
     }
 
-    const rideId = Number(req.params.rideId);
-    if (!Number.isInteger(rideId) || rideId <= 0) {
+    const userId = authUser.id;
+    const rideId = Number(req.params.id);
+
+    if (!rideId || Number.isNaN(rideId)) {
       return res
         .status(400)
-        .json(fail("INVALID_RIDE_ID", "Ride id must be a positive integer."));
+        .json(fail("INVALID_RIDE_ID", "Invalid ride ID parameter."));
     }
 
     try {
-      // Try schema with rider_id first; if that column doesn't exist,
-      // fall back to user_id. We only SELECT columns we actually use.
-      let rideRes;
+      const rideRes = await pool.query(
+        `
+        SELECT pickup_time, status
+        FROM rides
+        WHERE id = $1 AND user_id = $2
+        LIMIT 1
+        `,
+        [rideId, userId]
+      );
 
-      try {
-        rideRes = await pool.query(
-          `
-          SELECT id, pickup_time, status
-          FROM rides
-          WHERE id = $1 AND rider_id = $2
-          LIMIT 1
-          `,
-          [rideId, authUser.id]
-        );
-      } catch (err: any) {
-        // 42703 = undefined_column → probably no rider_id column in this DB
-        if (
-          err &&
-          (err.code === "42703" ||
-            (typeof err.message === "string" &&
-              err.message.includes("rider_id")))
-        ) {
-          rideRes = await pool.query(
-            `
-            SELECT id, pickup_time, status
-            FROM rides
-            WHERE id = $1 AND user_id = $2
-            LIMIT 1
-            `,
-            [rideId, authUser.id]
-          );
-        } else {
-          throw err;
-        }
-      }
-
-      if (!rideRes || !rideRes.rowCount || rideRes.rows.length === 0) {
+      if (!rideRes.rowCount) {
         return res
           .status(404)
           .json(fail("RIDE_NOT_FOUND", "Ride not found for this user."));
       }
 
       const ride = rideRes.rows[0] as {
-        id: number;
-        pickup_time: string | null;
+        pickup_time: string;
         status: string;
       };
 
-      if (!ride.pickup_time) {
-        return res
-          .status(400)
-          .json(
-            fail(
-              "NO_PICKUP_TIME",
-              "This ride cannot be cancelled right now."
-            )
-          );
-      }
-
-      const pickup = new Date(ride.pickup_time);
-      if (Number.isNaN(pickup.getTime())) {
-        return res
-          .status(400)
-          .json(
-            fail(
-              "INVALID_PICKUP_TIME",
-              "This ride has an invalid pickup time."
-            )
-          );
-      }
-
+      const pickupTime = new Date(ride.pickup_time);
       const now = new Date();
-      const diffMinutes = (pickup.getTime() - now.getTime()) / 60000;
+      const diffMs = pickupTime.getTime() - now.getTime();
+      const diffHours = diffMs / (1000 * 60 * 60);
 
-      if (diffMinutes < 15) {
-        return res.status(400).json(
-          fail(
-            "CANCEL_WINDOW_PASSED",
-            "Rides can only be cancelled up to 15 minutes before pickup."
-          )
-        );
-      }
-
-      // Block cancelling once already completed/cancelled
-      if (
-        ride.status === "completed" ||
-        ride.status === "cancelled" ||
-        ride.status === "cancelled_by_user" ||
-        ride.status === "cancelled_by_admin" ||
-        ride.status === "no_show"
-      ) {
+      if (diffHours < 1) {
         return res
           .status(400)
           .json(
             fail(
               "CANNOT_CANCEL",
-              "This ride can no longer be cancelled."
+              "Rides can only be cancelled at least 1 hour in advance."
             )
           );
       }
 
-      // Status update works for both schemas since we only touch status
       await pool.query(
         `
         UPDATE rides
@@ -1021,19 +849,14 @@ meRouter.post(
         [rideId]
       );
 
-      return res.json(
-        ok({
-          id: rideId,
-          status: "cancelled_by_user",
-        })
-      );
+      return res.json(ok({ success: true }));
     } catch (err) {
-      console.error("Error in POST /me/rides/:rideId/cancel:", err);
+      console.error("Error in POST /me/rides/:id/cancel:", err);
       return res
         .status(500)
         .json(
           fail(
-            "CANCEL_FAILED",
+            "CANCEL_RIDE_FAILED",
             "Failed to cancel this ride. Please try again."
           )
         );
@@ -1041,6 +864,165 @@ meRouter.post(
   }
 );
 
+/**
+ * --------------------------------------------------
+ *  POST /me/rides/:id/cancel (fallback for different schema)
+ *  This block is used when rider_id column exists instead of user_id.
+ * --------------------------------------------------
+ */
+meRouter.post(
+  "/rides/:id/cancel-fallback",
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const authUser = req.user;
+    if (!authUser) {
+      return res
+        .status(401)
+        .json(fail("UNAUTHENTICATED", "Please log in to cancel rides."));
+    }
+
+    const userId = authUser.id;
+    const rideId = Number(req.params.id);
+
+    if (!rideId || Number.isNaN(rideId)) {
+      return res
+        .status(400)
+        .json(fail("INVALID_RIDE_ID", "Invalid ride ID parameter."));
+    }
+
+    try {
+      let rideRes;
+      try {
+        rideRes = await pool.query(
+          `
+          SELECT pickup_time, status
+          FROM rides
+          WHERE id = $1 AND rider_id = $2
+          LIMIT 1
+          `,
+          [rideId, userId]
+        );
+      } catch (err: any) {
+        if (
+          err &&
+          (err.code === "42703" ||
+            (typeof err.message === "string" &&
+              err.message.includes("rider_id")))
+        ) {
+          rideRes = await pool.query(
+            `
+            SELECT pickup_time, status
+            FROM rides
+            WHERE id = $1 AND user_id = $2
+            LIMIT 1
+            `,
+            [rideId, userId]
+          );
+        } else {
+          throw err;
+        }
+      }
+
+      if (!rideRes.rowCount) {
+        return res
+          .status(404)
+          .json(fail("RIDE_NOT_FOUND", "Ride not found for this user."));
+      }
+
+      const ride = rideRes.rows[0] as {
+        pickup_time: string;
+        status: string;
+      };
+
+      const pickupTime = new Date(ride.pickup_time);
+      const now = new Date();
+      const diffMs = pickupTime.getTime() - now.getTime();
+      const diffHours = diffMs / (1000 * 60 * 60);
+
+      if (diffHours < 1) {
+        return res
+          .status(400)
+          .json(
+            fail(
+              "CANNOT_CANCEL",
+              "Rides can only be cancelled at least 1 hour in advance."
+            )
+          );
+      }
+
+      await pool.query(
+        `
+        UPDATE rides
+        SET status = 'cancelled_by_user'
+        WHERE id = $1
+        `,
+        [rideId]
+      );
+
+      return res.json(ok({ success: true }));
+    } catch (err) {
+      console.error("Error in POST /me/rides/:id/cancel-fallback:", err);
+      return res
+        .status(500)
+        .json(
+          fail(
+            "CANCEL_RIDE_FAILED",
+            "Failed to cancel this ride. Please try again."
+          )
+        );
+    }
+  }
+);
+
+/**
+ * --------------------------------------------------
+ *  POST /me/onboarding/skip
+ *  Mark onboarding as skipped for the current user.
+ * --------------------------------------------------
+ */
+meRouter.post(
+  "/onboarding/skip",
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const authUser = req.user;
+    if (!authUser) {
+      return res
+        .status(401)
+        .json(
+          fail("UNAUTHENTICATED", "Please log in to skip onboarding.")
+        );
+    }
+
+    const userId = authUser.id;
+
+    try {
+      await pool.query(
+        `
+        UPDATE users
+        SET onboarding_skipped = TRUE
+        WHERE id = $1
+        `,
+        [userId]
+      );
+
+      return res.json(
+        ok({
+          onboarding_skipped: true,
+        })
+      );
+    } catch (err) {
+      console.error("Error in POST /me/onboarding/skip:", err);
+      return res
+        .status(500)
+        .json(
+          fail(
+            "ONBOARDING_SKIP_FAILED",
+            "Failed to skip onboarding for user."
+          )
+        );
+    }
+  }
+);
 
 /**
  * --------------------------------------------------
@@ -1051,6 +1033,9 @@ meRouter.post(
  *    has_home: boolean;
  *    has_work: boolean;   // work OR school
  *    has_schedule: boolean;
+ *    onboarding_completed: boolean;
+ *    onboarding_skipped: boolean;
+ *    driver_is_online: boolean;
  *  }
  * --------------------------------------------------
  */
@@ -1059,7 +1044,9 @@ meRouter.post(
 function hasAnyRows(
   result: { rowCount: number | null } | null | undefined
 ): boolean {
-  return !!result && typeof result.rowCount === "number" && result.rowCount > 0;
+  return (
+    !!result && typeof result.rowCount === "number" && result.rowCount > 0
+  );
 }
 
 meRouter.get("/setup", requireAuth, async (req: Request, res: Response) => {
@@ -1067,13 +1054,15 @@ meRouter.get("/setup", requireAuth, async (req: Request, res: Response) => {
   if (!authUser) {
     return res
       .status(401)
-      .json(fail("UNAUTHENTICATED", "Please log in to view setup status."));
+      .json(
+        fail("UNAUTHENTICATED", "Please log in to view setup status.")
+      );
   }
 
   const userId = authUser.id;
 
   try {
-    const [homeRes, workRes, scheduleRes] = await Promise.all([
+    const [homeRes, workRes, scheduleRes, userRes] = await Promise.all([
       pool.query(
         `
         SELECT 1
@@ -1101,24 +1090,54 @@ meRouter.get("/setup", requireAuth, async (req: Request, res: Response) => {
         `,
         [userId]
       ),
+      pool.query(
+        `
+        SELECT
+          onboarding_completed,
+          onboarding_skipped,
+          driver_is_online,
+          driver_last_online_at
+        FROM users
+        WHERE id = $1
+        LIMIT 1
+        `,
+        [userId]
+      ),
     ]);
 
     const has_home = hasAnyRows(homeRes);
     const has_work = hasAnyRows(workRes);
     const has_schedule = hasAnyRows(scheduleRes);
 
+    const userRow =
+      userRes &&
+      (userRes as any).rows &&
+      Array.isArray((userRes as any).rows)
+        ? (userRes as any).rows[0]
+        : undefined;
+
     return res.json(
       ok({
         has_home,
         has_work,
         has_schedule,
+        onboarding_completed: !!(
+          userRow && userRow.onboarding_completed
+        ),
+        onboarding_skipped: !!(userRow && userRow.onboarding_skipped),
+        driver_is_online: !!(userRow && userRow.driver_is_online),
       })
     );
   } catch (err) {
     console.error("Error in GET /me/setup:", err);
     return res
       .status(500)
-      .json(fail("SETUP_CHECK_FAILED", "Failed to check setup status."));
+      .json(
+        fail(
+          "SETUP_CHECK_FAILED",
+          "Failed to check setup status."
+        )
+      );
   }
 });
 
