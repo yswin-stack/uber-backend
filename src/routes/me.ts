@@ -64,6 +64,17 @@ type SaveLocationBody = {
 };
 
 /**
+ * Extra type: per-day origin/destination override
+ * for schedule → generate-rides.
+ */
+type ScheduleRouteOverride = {
+  day_of_week: number;
+  direction: "to_work" | "to_home";
+  origin_label?: SavedLocationLabel;
+  destination_label?: SavedLocationLabel;
+};
+
+/**
  * --------------------------------------------------
  *  GET /me/schedule
  *  Returns weekly schedule rows for the logged-in user.
@@ -456,9 +467,19 @@ meRouter.post(
  *  consuming standard ride credits.
  *
  *  Optional body:
- *    { maxRides?: number }
- *  If provided, this caps how many rides we generate.
- *  Otherwise we try to infer from credits.
+ *    {
+ *      maxRides?: number;
+ *      routes?: {
+ *        day_of_week: number;
+ *        direction: "to_work" | "to_home";
+ *        origin_label?: "home" | "work" | "school" | "other";
+ *        destination_label?: "home" | "work" | "school" | "other";
+ *      }[];
+ *    }
+ *
+ *  If routes[] is provided, we use it to choose which saved
+ *  location labels to use for each ride, otherwise we fall back
+ *  to home ↔ work/school like before.
  * --------------------------------------------------
  */
 meRouter.post(
@@ -473,7 +494,10 @@ meRouter.post(
     }
 
     const userId = authUser.id;
-    const body = (req.body || {}) as { maxRides?: number };
+    const body = (req.body || {}) as {
+      maxRides?: number;
+      routes?: ScheduleRouteOverride[];
+    };
 
     try {
       // 1) Load weekly schedule for this user
@@ -506,13 +530,29 @@ meRouter.post(
         arrival_time: string;
       }[];
 
-      // 2) Load saved locations (home, work, school)
+      // 2) Optional per-day origin/destination overrides from body.routes
+      const routeOverrides = Array.isArray(body.routes)
+        ? (body.routes as ScheduleRouteOverride[])
+        : [];
+
+      const routeMap = new Map<string, ScheduleRouteOverride>();
+      for (const r of routeOverrides) {
+        if (
+          typeof r.day_of_week === "number" &&
+          (r.direction === "to_work" || r.direction === "to_home")
+        ) {
+          const key = `${r.day_of_week}:${r.direction}`;
+          routeMap.set(key, r);
+        }
+      }
+
+      // 3) Load saved locations (home, work, school, other)
       const locRes = await pool.query(
         `
         SELECT label, address
         FROM saved_locations
         WHERE user_id = $1
-          AND label IN ('home', 'work', 'school')
+          AND label IN ('home', 'work', 'school', 'other')
         `,
         [userId]
       );
@@ -520,6 +560,7 @@ meRouter.post(
       let homeAddress = "";
       let workAddress = "";
       let schoolAddress = "";
+      let otherAddress = "";
 
       for (const row of locRes.rows as { label: string; address: string }[]) {
         const label = row.label as SavedLocationLabel;
@@ -527,6 +568,7 @@ meRouter.post(
         if (label === "home") homeAddress = addr;
         if (label === "work") workAddress = addr;
         if (label === "school") schoolAddress = addr;
+        if (label === "other") otherAddress = addr;
       }
 
       if (!homeAddress) {
@@ -538,9 +580,9 @@ meRouter.post(
         );
       }
 
-      // Prefer "work" for destination, fallback to "school"
-      const destinationAddress = workAddress || schoolAddress;
-      if (!destinationAddress) {
+      // Legacy destination address (used if no overrides)
+      const defaultDestinationAddress = workAddress || schoolAddress;
+      if (!defaultDestinationAddress) {
         return res.status(400).json(
           fail(
             "NO_WORK_LOCATION",
@@ -549,7 +591,23 @@ meRouter.post(
         );
       }
 
-      // 3) Determine how many rides we are allowed to generate
+      // Helper: map label -> actual address string
+      function addressForLabel(label: SavedLocationLabel): string {
+        switch (label) {
+          case "home":
+            return homeAddress;
+          case "work":
+            return workAddress;
+          case "school":
+            return schoolAddress;
+          case "other":
+            return otherAddress;
+          default:
+            return "";
+        }
+      }
+
+      // 4) Determine how many rides we are allowed to generate
       let ridesRemaining: number | null = null;
       let creditsLoaded = false;
 
@@ -604,7 +662,7 @@ meRouter.post(
         );
       }
 
-      // 4) Generate rides from today forward (e.g. next 60 days)
+      // 5) Generate rides from today forward (e.g. next 60 days)
       const today = new Date();
       today.setHours(0, 0, 0, 0);
 
@@ -666,27 +724,40 @@ meRouter.post(
             [riderId, pickup_location, dropoff_location, pickupTimeIso]
           );
         } catch (err: any) {
+          // Duplicate? Treat as no-op (idempotent generate)
+          if (err && err.code === "23505") {
+            return;
+          }
+
           // If the column rider_id doesn't exist, fall back to user_id (V1 schema)
           if (
             err &&
-            (err.code === "42703" || // undefined_column
+            (err.code === "42703" ||
               (typeof err.message === "string" &&
                 err.message.includes("rider_id")))
           ) {
-            await pool.query(
-              `
-              INSERT INTO rides (
-                user_id,
-                pickup_location,
-                dropoff_location,
-                pickup_time,
-                status,
-                ride_type
-              )
-              VALUES ($1, $2, $3, $4, 'scheduled', 'standard')
-              `,
-              [riderId, pickup_location, dropoff_location, pickupTimeIso]
-            );
+            try {
+              await pool.query(
+                `
+                INSERT INTO rides (
+                  user_id,
+                  pickup_location,
+                  dropoff_location,
+                  pickup_time,
+                  status,
+                  ride_type
+                )
+                VALUES ($1, $2, $3, $4, 'scheduled', 'standard')
+                `,
+                [riderId, pickup_location, dropoff_location, pickupTimeIso]
+              );
+            } catch (err2: any) {
+              // Duplicate on user_id schema → also treat as no-op
+              if (err2 && err2.code === "23505") {
+                return;
+              }
+              throw err2;
+            }
           } else {
             // Some other error: rethrow
             throw err;
@@ -716,15 +787,49 @@ meRouter.post(
 
           const pickupTimeIso = dt.toISOString();
 
-          let pickup_location: string;
-          let dropoff_location: string;
+          // Decide origin/destination labels for this row
+          const key = `${row.day_of_week}:${row.direction}`;
+          const override = routeMap.get(key);
 
-          if (row.direction === "to_work") {
-            pickup_location = homeAddress;
-            dropoff_location = destinationAddress;
+          let originLabel: SavedLocationLabel;
+          let destinationLabel: SavedLocationLabel;
+
+          if (override && override.origin_label && override.destination_label) {
+            originLabel = override.origin_label;
+            destinationLabel = override.destination_label;
           } else {
-            pickup_location = destinationAddress;
-            dropoff_location = homeAddress;
+            // Legacy mapping: home ↔ work/school
+            if (row.direction === "to_work") {
+              originLabel = "home";
+              // prefer work/school
+              destinationLabel = workAddress
+                ? "work"
+                : schoolAddress
+                ? "school"
+                : "home";
+            } else {
+              // to_home
+              destinationLabel = "home";
+              originLabel = workAddress
+                ? "work"
+                : schoolAddress
+                ? "school"
+                : "home";
+            }
+          }
+
+          const pickup_location = addressForLabel(originLabel);
+          const dropoff_location = addressForLabel(destinationLabel);
+
+          if (!pickup_location || !dropoff_location) {
+            // If a label was chosen but no address exists → fail clearly.
+            await pool.query("ROLLBACK");
+            return res.status(400).json(
+              fail(
+                "MISSING_LOCATION_ADDRESS",
+                "One of your chosen locations does not have an address saved. Please set your home/work/school/other addresses and try again."
+              )
+            );
           }
 
           await insertScheduledRide(
