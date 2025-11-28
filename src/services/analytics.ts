@@ -6,7 +6,11 @@ export type AnalyticsEventName =
   | "subscription_activate"
   | "ride_created"
   | "ride_completed"
-  | "ride_cancelled";
+  | "ride_cancelled"
+  | "driver_accepted_ride"
+  | "driver_updated_ride_status"
+  | "ride_rated";
+
 
 export interface AnalyticsEventPayload {
   [key: string]: unknown;
