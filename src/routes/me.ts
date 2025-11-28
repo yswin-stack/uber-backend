@@ -883,6 +883,10 @@ meRouter.post(
  *  Allow rider to cancel own ride, but only up to
  *  15 minutes before pickup_time.
  *
+ *  Works with both schemas:
+ *    - rides(rider_id, ...)
+ *    - rides(user_id, ...)
+ *
  *  Response:
  *    { id: number; status: string }
  * --------------------------------------------------
@@ -906,18 +910,43 @@ meRouter.post(
     }
 
     try {
-      // Fetch ride for this user
-      const rideRes = await pool.query(
-        `
-        SELECT id, rider_id, pickup_time, status
-        FROM rides
-        WHERE id = $1 AND rider_id = $2
-        LIMIT 1
-        `,
-        [rideId, authUser.id]
-      );
+      // Try schema with rider_id first; if that column doesn't exist,
+      // fall back to user_id. We only SELECT columns we actually use.
+      let rideRes;
 
-      if (!rideRes.rowCount || rideRes.rows.length === 0) {
+      try {
+        rideRes = await pool.query(
+          `
+          SELECT id, pickup_time, status
+          FROM rides
+          WHERE id = $1 AND rider_id = $2
+          LIMIT 1
+          `,
+          [rideId, authUser.id]
+        );
+      } catch (err: any) {
+        // 42703 = undefined_column → probably no rider_id column in this DB
+        if (
+          err &&
+          (err.code === "42703" ||
+            (typeof err.message === "string" &&
+              err.message.includes("rider_id")))
+        ) {
+          rideRes = await pool.query(
+            `
+            SELECT id, pickup_time, status
+            FROM rides
+            WHERE id = $1 AND user_id = $2
+            LIMIT 1
+            `,
+            [rideId, authUser.id]
+          );
+        } else {
+          throw err;
+        }
+      }
+
+      if (!rideRes || !rideRes.rowCount || rideRes.rows.length === 0) {
         return res
           .status(404)
           .json(fail("RIDE_NOT_FOUND", "Ride not found for this user."));
@@ -925,7 +954,6 @@ meRouter.post(
 
       const ride = rideRes.rows[0] as {
         id: number;
-        rider_id: number;
         pickup_time: string | null;
         status: string;
       };
@@ -965,7 +993,7 @@ meRouter.post(
         );
       }
 
-      // Optional: block cancelling once already completed/cancelled
+      // Block cancelling once already completed/cancelled
       if (
         ride.status === "completed" ||
         ride.status === "cancelled" ||
@@ -983,6 +1011,7 @@ meRouter.post(
           );
       }
 
+      // Status update works for both schemas since we only touch status
       await pool.query(
         `
         UPDATE rides
@@ -1011,6 +1040,7 @@ meRouter.post(
     }
   }
 );
+
 
 /**
  * --------------------------------------------------
