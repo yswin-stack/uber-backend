@@ -974,6 +974,142 @@ meRouter.post(
   }
 );
 
+
+/**
+ * --------------------------------------------------
+ *  GET /me/next-ride-live
+ *  Returns the next upcoming ride for this rider within a short window,
+ *  plus a simple ETA based on the scheduled pickup time.
+ *
+ *  This is intentionally lightweight:
+ *  - We DO NOT depend on live driver GPS here yet.
+ *  - Frontend can use this to decide when to show the live map and which rideId to subscribe to.
+ *
+ *  Response (wrapped in ApiSuccess):
+ *    {
+ *      hasUpcomingRide: boolean;
+ *      windowMinutes: number;
+ *      ride?: {
+ *        id: number;
+ *        pickup_location: string;
+ *        dropoff_location: string;
+ *        pickup_time: string; // ISO
+ *        status: string;
+ *        ride_type: string;
+ *      };
+ *      eta?: {
+ *        minutes_until_pickup: number;
+ *        pickup_time_iso: string;
+ *      };
+ *    }
+ * --------------------------------------------------
+ */
+const UPCOMING_RIDE_WINDOW_MINUTES = 20;
+
+meRouter.get(
+  "/next-ride-live",
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const authUser = req.user;
+    if (!authUser) {
+      return res
+        .status(401)
+        .json(
+          fail("UNAUTHENTICATED", "Please log in to view your upcoming ride.")
+        );
+    }
+
+    const userId = authUser.id;
+    const now = new Date();
+    const windowEnd = new Date(
+      now.getTime() + UPCOMING_RIDE_WINDOW_MINUTES * 60 * 1000
+    );
+
+    try {
+      const rideRes = await pool.query(
+        `
+        SELECT
+          id,
+          pickup_location,
+          dropoff_location,
+          pickup_time,
+          status,
+          ride_type
+        FROM rides
+        WHERE user_id = $1
+          AND pickup_time >= $2
+          AND pickup_time <= $3
+          AND status IN (
+            'pending',
+            'scheduled',
+            'driver_en_route',
+            'arrived',
+            'in_progress'
+          )
+        ORDER BY pickup_time ASC
+        LIMIT 1
+        `,
+        [userId, now.toISOString(), windowEnd.toISOString()]
+      );
+
+      if (!rideRes.rowCount) {
+        return res.json(
+          ok({
+            hasUpcomingRide: false,
+            windowMinutes: UPCOMING_RIDE_WINDOW_MINUTES,
+          })
+        );
+      }
+
+      const ride = rideRes.rows[0] as {
+        id: number;
+        pickup_location: string;
+        dropoff_location: string;
+        pickup_time: string;
+        status: string;
+        ride_type: string;
+      };
+
+      const pickupTime = new Date(ride.pickup_time);
+      const diffMs = pickupTime.getTime() - now.getTime();
+      const minutesUntilPickup = Math.max(
+        0,
+        Math.round(diffMs / (60 * 1000))
+      );
+
+      return res.json(
+        ok({
+          hasUpcomingRide: true,
+          windowMinutes: UPCOMING_RIDE_WINDOW_MINUTES,
+          ride: {
+            id: ride.id,
+            pickup_location: ride.pickup_location,
+            dropoff_location: ride.dropoff_location,
+            pickup_time: ride.pickup_time,
+            status: ride.status,
+            ride_type: ride.ride_type,
+          },
+          eta: {
+            minutes_until_pickup: minutesUntilPickup,
+            pickup_time_iso: pickupTime.toISOString(),
+          },
+        })
+      );
+    } catch (err) {
+      console.error("Error in GET /me/next-ride-live:", err);
+      return res
+        .status(500)
+        .json(
+          fail(
+            "NEXT_RIDE_LIVE_FAILED",
+            "Failed to load your upcoming ride. Please try again."
+          )
+        );
+    }
+  }
+);
+
+
 /**
  * --------------------------------------------------
  *  POST /me/onboarding/skip
