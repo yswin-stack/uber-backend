@@ -824,5 +824,170 @@ ridesRouter.post(
   }
 );
 
+/**
+ * --------------------------------------------------
+ *  POST /rides/:id/feedback
+ *
+ *  Rider-facing endpoint to leave:
+ *   - 1–5 star rating
+ *   - Optional comment
+ *   - Optional tip (in cents, placeholder for card charge)
+ *
+ *  Constraints:
+ *   - Must be logged in.
+ *   - Must be the rider who owns the ride.
+ *   - Ride must be completed.
+ *   - One feedback row per ride (upsert).
+ * --------------------------------------------------
+ */
+ridesRouter.post(
+  "/:id/feedback",
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const authUser = req.user;
+    if (!authUser) {
+      return res
+        .status(401)
+        .json(fail("AUTH_REQUIRED", "Please log in to rate your ride."));
+    }
+
+    const riderId = authUser.id;
+    const rideId = parseInt(req.params.id, 10);
+    if (Number.isNaN(rideId)) {
+      return res
+        .status(400)
+        .json(fail("INVALID_RIDE_ID", "Invalid ride id."));
+    }
+
+    const { rating, comment, tip_cents } = req.body ?? {};
+    const ratingNum = Number(rating);
+    const tipCents =
+      tip_cents === undefined || tip_cents === null
+        ? 0
+        : Math.max(0, Number(tip_cents));
+
+    if (!Number.isFinite(ratingNum) || ratingNum < 1 || ratingNum > 5) {
+      return res.status(400).json(
+        fail(
+          "INVALID_RATING",
+          "Rating must be an integer between 1 and 5."
+        )
+      );
+    }
+
+    const commentStr =
+      typeof comment === "string" && comment.trim().length > 0
+        ? comment.trim()
+        : null;
+
+    const client = await pool.connect();
+
+    try {
+      await client.query("BEGIN");
+
+      // 1) Verify the ride belongs to this rider and is completed
+      const rideRes = await client.query(
+        `
+        SELECT id, user_id, status
+        FROM rides
+        WHERE id = $1
+        FOR UPDATE
+        `,
+        [rideId]
+      );
+
+      if (rideRes.rowCount === 0) {
+        await client.query("ROLLBACK");
+        return res
+          .status(404)
+          .json(fail("RIDE_NOT_FOUND", "Ride not found."));
+      }
+
+      const ride = rideRes.rows[0] as {
+        id: number;
+        user_id: number;
+        status: string;
+      };
+
+      if (ride.user_id !== riderId) {
+        await client.query("ROLLBACK");
+        return res
+          .status(403)
+          .json(
+            fail(
+              "FORBIDDEN",
+              "You can only rate rides that belong to your account."
+            )
+          );
+      }
+
+      if (ride.status !== "completed") {
+        await client.query("ROLLBACK");
+        return res.status(400).json(
+          fail(
+            "RIDE_NOT_COMPLETED",
+            "You can only rate a ride after it has been completed."
+          )
+        );
+      }
+
+      // 2) Upsert feedback row
+      const feedbackRes = await client.query(
+        `
+        INSERT INTO ride_feedback (ride_id, rider_id, rating, comment, tip_cents)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (ride_id)
+        DO UPDATE SET
+          rating = EXCLUDED.rating,
+          comment = EXCLUDED.comment,
+          tip_cents = EXCLUDED.tip_cents,
+          created_at = now()
+        RETURNING
+          id,
+          ride_id,
+          rider_id,
+          rating,
+          comment,
+          tip_cents,
+          created_at
+        `,
+        [rideId, riderId, ratingNum, commentStr, tipCents]
+      );
+
+      const feedback = feedbackRes.rows[0];
+
+      await client.query("COMMIT");
+
+      // (Optional) analytics hook
+      try {
+        await logRideEvent("ride_rated", {
+          rideId,
+          riderId,
+          rating: ratingNum,
+          tipCents,
+        });
+      } catch (logErr) {
+        console.warn("[analytics] Failed to log ride_rated:", logErr);
+      }
+
+      return res.json(
+        ok({
+          feedback,
+        })
+      );
+    } catch (err) {
+      await client.query("ROLLBACK");
+      console.error("Error in POST /rides/:id/feedback:", err);
+      return res
+        .status(500)
+        .json(fail("FEEDBACK_FAILED", "Failed to save feedback."));
+    } finally {
+      client.release();
+    }
+  }
+);
+
+
+
 export { ridesRouter };
 export default ridesRouter;
