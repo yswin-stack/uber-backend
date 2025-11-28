@@ -59,13 +59,24 @@ async function ensureDriverOrAdmin(
 /**
  * POST /driver/start-day
  * Marks the driver as online for today and records last_online timestamp.
+ * Supports both JWT (req.user) and legacy headers (x-user-id).
  */
 driverRouter.post("/start-day", async (req: Request, res: Response) => {
-  const userId = getUserIdFromHeader(req);
+  // Try to get user ID from JWT first (req.user from auth middleware)
+  let userId: number | null = null;
+  if ((req as any).user && (req as any).user.id) {
+    userId = (req as any).user.id;
+  }
+
+  // Fallback to header if JWT not available
+  if (!userId) {
+    userId = getUserIdFromHeader(req);
+  }
+
   if (!userId) {
     return res
       .status(401)
-      .json({ error: "Missing or invalid x-user-id header." });
+      .json({ error: "Missing or invalid authentication. Please log in." });
   }
 
   try {
@@ -344,6 +355,108 @@ driverRouter.post(
     }
   }
 );
+
+/**
+ * GET /driver/reviews
+ * Returns reviews/feedback for rides completed by the logged-in driver.
+ * Joins ride_feedback with rides and users to return ratings, comments, and tips.
+ */
+driverRouter.get("/reviews", async (req: Request, res: Response) => {
+  const userId = getUserIdFromHeader(req);
+  if (!userId) {
+    return res
+      .status(401)
+      .json({ error: "Missing or invalid x-user-id header." });
+  }
+
+  try {
+    await ensureDriverOrAdmin(userId);
+  } catch (err: any) {
+    if (err.message === "user_not_found") {
+      return res.status(404).json({ error: "User not found." });
+    }
+    if (err.message === "forbidden") {
+      return res
+        .status(403)
+        .json({ error: "Only drivers/admins can view this." });
+    }
+    console.error("Error in /driver/reviews auth:", err);
+    return res.status(500).json({ error: "Internal error." });
+  }
+
+  try {
+    // Query ride_feedback joined with rides and users
+    // For now, we'll get all feedback (single-driver system)
+    // In the future, filter by driver_id when that column is populated
+    const result = await pool.query(
+      `
+      SELECT
+        rf.id,
+        rf.ride_id,
+        rf.rating,
+        rf.comment,
+        rf.tip_cents,
+        rf.created_at,
+        r.pickup_time,
+        r.pickup_location,
+        r.dropoff_location,
+        u.name AS rider_name
+      FROM ride_feedback rf
+      JOIN rides r ON r.id = rf.ride_id
+      JOIN users u ON u.id = rf.rider_id
+      WHERE r.status = 'completed'
+      ORDER BY rf.created_at DESC
+      LIMIT 100
+      `
+    );
+
+    // Calculate summary statistics
+    const summaryResult = await pool.query(
+      `
+      SELECT
+        COUNT(*) AS count,
+        AVG(rf.rating) AS average_rating,
+        COALESCE(SUM(rf.tip_cents), 0) AS total_tips_cents
+      FROM ride_feedback rf
+      JOIN rides r ON r.id = rf.ride_id
+      WHERE r.status = 'completed'
+      `
+    );
+
+    const summary = summaryResult.rows[0] || {
+      count: 0,
+      average_rating: null,
+      total_tips_cents: 0,
+    };
+
+    return res.json({
+      ok: true,
+      summary: {
+        count: parseInt(summary.count || "0", 10),
+        average_rating:
+          summary.average_rating != null
+            ? parseFloat(summary.average_rating)
+            : null,
+        total_tips_cents: parseInt(summary.total_tips_cents || "0", 10),
+      },
+      reviews: result.rows.map((row: any) => ({
+        id: row.id,
+        ride_id: row.ride_id,
+        rating: row.rating,
+        comment: row.comment,
+        tip_cents: row.tip_cents || 0,
+        created_at: row.created_at,
+        pickup_time: row.pickup_time,
+        pickup_location: row.pickup_location,
+        dropoff_location: row.dropoff_location,
+        rider_name: row.rider_name,
+      })),
+    });
+  } catch (err) {
+    console.error("Error in GET /driver/reviews:", err);
+    return res.status(500).json({ error: "Failed to load driver reviews." });
+  }
+});
 
 /**
  * POST /driver/rides/:id/status
