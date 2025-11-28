@@ -958,13 +958,13 @@ ridesRouter.post(
 
       await client.query("COMMIT");
 
-      // (Optional) analytics hook
+          // (Optional) analytics hook – lightweight event for ratings
       try {
-        await logRideEvent("ride_rated", {
-          rideId,
-          riderId,
+        await logEvent("ride_rated", {
+          ride_id: rideId,
+          rider_id: riderId,
           rating: ratingNum,
-          tipCents,
+          tip_cents: tipCents,
         });
       } catch (logErr) {
         console.warn("[analytics] Failed to log ride_rated:", logErr);
