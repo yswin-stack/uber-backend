@@ -4,7 +4,6 @@ import {
   sendRideStatusNotification,
   type RideStatusNotificationEvent,
 } from "../services/notifications";
-
 import { logEvent } from "../services/analytics";
 
 const driverRouter = Router();
@@ -33,7 +32,9 @@ function getUserIdFromHeader(req: Request): number | null {
   return Number.isNaN(id) ? null : id;
 }
 
-async function ensureDriverOrAdmin(userId: number): Promise<"driver" | "admin"> {
+async function ensureDriverOrAdmin(
+  userId: number
+): Promise<"driver" | "admin"> {
   const result = await pool.query(
     `
     SELECT role
@@ -427,7 +428,9 @@ driverRouter.post(
         const diffMs = now.getTime() - pickupTime.getTime();
         const diffMinutes = Math.max(0, diffMs / 60000);
         const extraMinutes = Math.max(0, diffMinutes - FREE_WAIT_MINUTES);
-        waitPriceCents += Math.round(extraMinutes * WAIT_PRICE_PER_MIN_CENTS);
+        waitPriceCents += Math.round(
+          extraMinutes * WAIT_PRICE_PER_MIN_CENTS
+        );
       }
 
       let arrivedAt = ride.arrived_at;
@@ -469,7 +472,7 @@ driverRouter.post(
         ]
       );
 
-          const updatedRide = updateRes.rows[0];
+      const updatedRide = updateRes.rows[0];
 
       await client.query("COMMIT");
 
@@ -486,7 +489,6 @@ driverRouter.post(
         status,
       });
 
-
       return res.json({
         ok: true,
         ride: updatedRide,
@@ -502,102 +504,5 @@ driverRouter.post(
     }
   }
 );
-
-/**
- * --------------------------------------------------
- *  GET /driver/reviews
- *
- *  Driver / Admin view of recent ride feedback.
- *  For now: single-driver system, so we simply return
- *  all feedback records with basic ride + rider info.
- * --------------------------------------------------
- */
-driverRouter.get(
-  "/reviews",
-  async (req: Request, res: Response) => {
-    const userId = getUserIdFromHeader(req);
-    if (!userId) {
-      return res
-        .status(401)
-        .json({ error: "Missing or invalid x-user-id header." });
-    }
-
-    try {
-      // Ensure caller is driver or admin
-      await ensureDriverOrAdmin(userId);
-    } catch (err: any) {
-      if (err.message === "user_not_found") {
-        return res.status(404).json({ error: "User not found." });
-      }
-      if (err.message === "forbidden") {
-        return res
-          .status(403)
-          .json({ error: "Only drivers/admins can view reviews." });
-      }
-      console.error("Error authing /driver/reviews:", err);
-      return res.status(500).json({ error: "Internal error." });
-    }
-
-    try {
-      const feedbackRes = await pool.query(
-        `
-        SELECT
-          rf.id,
-          rf.ride_id,
-          rf.rating,
-          rf.comment,
-          rf.tip_cents,
-          rf.created_at,
-          r.pickup_time,
-          r.pickup_location,
-          r.dropoff_location,
-          u.full_name AS rider_name
-        FROM ride_feedback rf
-        JOIN rides r ON r.id = rf.ride_id
-        JOIN users u ON u.id = r.user_id
-        ORDER BY rf.created_at DESC
-        LIMIT 50
-        `
-      );
-
-      const rows = feedbackRes.rows;
-
-      // Simple aggregates for quick glance
-      let totalRating = 0;
-      let countRating = 0;
-      let totalTipsCents = 0;
-
-      for (const row of rows) {
-        if (typeof row.rating === "number") {
-          totalRating += row.rating;
-          countRating += 1;
-        }
-        if (typeof row.tip_cents === "number") {
-          totalTipsCents += row.tip_cents;
-        }
-      }
-
-      const averageRating =
-        countRating > 0 ? Number((totalRating / countRating).toFixed(2)) : null;
-
-      return res.json({
-        ok: true,
-        summary: {
-          count: countRating,
-          average_rating: averageRating,
-          total_tips_cents: totalTipsCents,
-        },
-        reviews: rows,
-      });
-    } catch (err) {
-      console.error("Error in GET /driver/reviews:", err);
-      return res.status(500).json({
-        error: "Failed to load driver reviews.",
-      });
-    }
-  }
-);
-
-
 
 export default driverRouter;
