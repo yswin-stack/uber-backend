@@ -3,7 +3,6 @@ import { pool } from "../db/pool";
 import { sendRideStatusNotification } from "../services/notifications";
 import { logEvent } from "../services/analytics";
 
-
 const driverRouter = Router();
 
 type DriverStatus =
@@ -15,13 +14,13 @@ type DriverStatus =
 
 const ALLOWED_NEXT_STATUSES: Record<string, DriverStatus[]> = {
   confirmed: ["driver_en_route", "arrived"],
-  driver_en_route: ["arrived"],
+  driver_en_route: ["arrived", "in_progress"],
   arrived: ["in_progress", "no_show"],
   in_progress: ["completed"],
 };
 
-const FREE_WAIT_MINUTES = 2; // free wait
-const WAIT_PRICE_PER_MIN_CENTS = 100; // $1.00 per minute after free
+const FREE_WAIT_MINUTES = 2;
+const WAIT_PRICE_PER_MIN_CENTS = 100;
 
 function getUserIdFromHeader(req: Request): number | null {
   const h = req.header("x-user-id");
@@ -51,6 +50,62 @@ async function ensureDriverOrAdmin(userId: number): Promise<"driver" | "admin"> 
 
   return role;
 }
+
+/**
+ * POST /driver/start-day
+ * Marks the driver as online for today and records last_online timestamp.
+ */
+driverRouter.post("/start-day", async (req: Request, res: Response) => {
+  const userId = getUserIdFromHeader(req);
+  if (!userId) {
+    return res
+      .status(401)
+      .json({ error: "Missing or invalid x-user-id header." });
+  }
+
+  try {
+    await ensureDriverOrAdmin(userId);
+  } catch (err: any) {
+    if (err.message === "user_not_found") {
+      return res.status(404).json({ error: "User not found." });
+    }
+    if (err.message === "forbidden") {
+      return res.status(403).json({
+        error: "Only drivers/admins can perform this action.",
+      });
+    }
+    console.error("Error in /driver/start-day auth:", err);
+    return res.status(500).json({ error: "Internal error." });
+  }
+
+  try {
+    const result = await pool.query(
+      `
+      UPDATE users
+      SET
+        driver_is_online = TRUE,
+        driver_last_online_at = now()
+      WHERE id = $1
+      RETURNING id, driver_is_online, driver_last_online_at
+      `,
+      [userId]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: "User not found." });
+    }
+
+    return res.json({
+      ok: true,
+      driver: result.rows[0],
+    });
+  } catch (err) {
+    console.error("Error in POST /driver/start-day:", err);
+    return res
+      .status(500)
+      .json({ error: "Failed to start driver day." });
+  }
+});
 
 /**
  * Convert Date → YYYY-MM-DD (UTC)
@@ -140,12 +195,72 @@ driverRouter.get("/rides/today", async (req: Request, res: Response) => {
 
 /**
  * GET /driver/rides/requests
- *
- * For (future) on-demand style rides: show rides that are still pending and
- * not yet taken by a driver.
+ * Pending ride requests for driver (for now: all pending; later per-driver).
  */
-driverRouter.get(
-  "/rides/requests",
+driverRouter.get("/rides/requests", async (req: Request, res: Response) => {
+  const userId = getUserIdFromHeader(req);
+  if (!userId) {
+    return res
+      .status(401)
+      .json({ error: "Missing or invalid x-user-id header." });
+  }
+
+  try {
+    await ensureDriverOrAdmin(userId);
+  } catch (err: any) {
+    if (err.message === "user_not_found") {
+      return res.status(404).json({ error: "User not found." });
+    }
+    if (err.message === "forbidden") {
+      return res
+        .status(403)
+        .json({ error: "Only drivers/admins can view this." });
+    }
+    console.error("Error in /driver/rides/requests auth:", err);
+    return res.status(500).json({ error: "Internal error." });
+  }
+
+  try {
+    const result = await pool.query(
+      `
+      SELECT
+        id,
+        user_id,
+        driver_id,
+        pickup_location,
+        dropoff_location,
+        pickup_time,
+        pickup_window_start,
+        pickup_window_end,
+        arrival_window_start,
+        arrival_window_end,
+        status,
+        ride_type,
+        notes
+      FROM rides
+      WHERE status = 'pending'
+      ORDER BY pickup_time ASC
+      `
+    );
+
+    return res.json({
+      ok: true,
+      rides: result.rows,
+    });
+  } catch (err) {
+    console.error("Error in GET /driver/rides/requests:", err);
+    return res
+      .status(500)
+      .json({ error: "Failed to load ride requests." });
+  }
+});
+
+/**
+ * POST /driver/rides/:id/accept
+ * Accept a pending ride request (assign driver_id).
+ */
+driverRouter.post(
+  "/rides/:id/accept",
   async (req: Request, res: Response) => {
     const userId = getUserIdFromHeader(req);
     if (!userId) {
@@ -154,53 +269,73 @@ driverRouter.get(
         .json({ error: "Missing or invalid x-user-id header." });
     }
 
-    try {
-      await ensureDriverOrAdmin(userId);
-    } catch (err: any) {
-      if (err.message === "user_not_found") {
-        return res.status(404).json({ error: "User not found." });
-      }
-      if (err.message === "forbidden") {
-        return res
-          .status(403)
-          .json({ error: "Only drivers/admins can view this." });
-      }
-      console.error("Error in /driver/rides/requests auth:", err);
-      return res.status(500).json({ error: "Internal error." });
+    const rideId = Number(req.params.id);
+    if (!rideId || Number.isNaN(rideId)) {
+      return res.status(400).json({ error: "Invalid ride ID." });
     }
 
+    const client = await pool.connect();
+
     try {
-      const result = await pool.query(
+      await ensureDriverOrAdmin(userId);
+
+      await client.query("BEGIN");
+
+      const rideRes = await client.query(
         `
-        SELECT
-          id,
-          user_id,
-          driver_id,
-          pickup_location,
-          dropoff_location,
-          pickup_time,
-          pickup_window_start,
-          pickup_window_end,
-          arrival_window_start,
-          arrival_window_end,
-          status,
-          ride_type,
-          notes
+        SELECT id, status, driver_id
         FROM rides
-        WHERE status = 'pending'
-        ORDER BY pickup_time ASC
-        `
+        WHERE id = $1
+        FOR UPDATE
+        `,
+        [rideId]
       );
 
-      return res.json({
-        ok: true,
-        rides: result.rows,
+      if (!rideRes.rowCount) {
+        await client.query("ROLLBACK");
+        return res.status(404).json({ error: "Ride not found." });
+      }
+
+      const ride = rideRes.rows[0] as {
+        id: number;
+        status: string;
+        driver_id: number | null;
+      };
+
+      if (ride.status !== "pending") {
+        await client.query("ROLLBACK");
+        return res
+          .status(400)
+          .json({ error: "Ride is no longer available to accept." });
+      }
+
+      await client.query(
+        `
+        UPDATE rides
+        SET
+          driver_id = $1,
+          status = 'confirmed'
+        WHERE id = $2
+        `,
+        [userId, rideId]
+      );
+
+      await client.query("COMMIT");
+
+      await logEvent("driver_accepted_ride", {
+        driver_id: userId,
+        ride_id: rideId,
       });
+
+      return res.json({ ok: true });
     } catch (err) {
-      console.error("Error in GET /driver/rides/requests:", err);
+      await client.query("ROLLBACK");
+      console.error("Error in POST /driver/rides/:id/accept:", err);
       return res
         .status(500)
-        .json({ error: "Failed to load driver ride requests." });
+        .json({ error: "Failed to accept ride." });
+    } finally {
+      client.release();
     }
   }
 );
@@ -208,13 +343,6 @@ driverRouter.get(
 /**
  * POST /driver/rides/:id/status
  * Body: { status: "driver_en_route" | "arrived" | "in_progress" | "completed" | "no_show" }
- *
- * - arrived   → sets arrived_at
- * - in_progress → sets in_progress_at,
- * - completed → sets completed_at
- * - no_show  → sets no_show_at
- *
- * Also handles simple wait-time + late compensation logic.
  */
 driverRouter.post(
   "/rides/:id/status",
@@ -226,186 +354,143 @@ driverRouter.post(
         .json({ error: "Missing or invalid x-user-id header." });
     }
 
-    const rideId = parseInt(req.params.id, 10);
-    if (Number.isNaN(rideId)) {
-      return res.status(400).json({ error: "Invalid ride id." });
+    const rideId = Number(req.params.id);
+    const { status } = req.body as { status?: DriverStatus };
+
+    if (!rideId || Number.isNaN(rideId)) {
+      return res.status(400).json({ error: "Invalid ride ID." });
     }
 
-    const newStatus: DriverStatus | undefined = req.body?.status;
-    if (
-      !newStatus ||
-      !["driver_en_route", "arrived", "in_progress", "completed", "no_show"].includes(
-        newStatus
-      )
-    ) {
-      return res.status(400).json({ error: "Invalid or missing status." });
+    if (!status) {
+      return res.status(400).json({ error: "Missing status in body." });
     }
 
     const client = await pool.connect();
 
     try {
+      await ensureDriverOrAdmin(userId);
+
       await client.query("BEGIN");
 
-      // Load ride with FOR UPDATE
       const rideRes = await client.query(
         `
         SELECT
-          r.*,
-          u.phone AS rider_phone
-        FROM rides r
-        JOIN users u ON u.id = r.user_id
-        WHERE r.id = $1
+          id,
+          user_id,
+          driver_id,
+          pickup_time,
+          status,
+          arrived_at,
+          in_progress_at,
+          completed_at,
+          no_show_at,
+          wait_price_cents
+        FROM rides
+        WHERE id = $1
         FOR UPDATE
         `,
         [rideId]
       );
 
-      if (rideRes.rowCount === 0) {
+      if (!rideRes.rowCount) {
         await client.query("ROLLBACK");
         return res.status(404).json({ error: "Ride not found." });
       }
 
-      const ride = rideRes.rows[0] as any;
+      const ride = rideRes.rows[0] as {
+        id: number;
+        user_id: number;
+        driver_id: number | null;
+        pickup_time: string;
+        status: string;
+        arrived_at: string | null;
+        in_progress_at: string | null;
+        completed_at: string | null;
+        no_show_at: string | null;
+        wait_price_cents: number | null;
+      };
 
-      // Basic allowed transition check
-      const currentStatus: DriverStatus | "pending" | "scheduled" =
-        ride.status ?? "pending";
-
-      const allowedNext = ALLOWED_NEXT_STATUSES[currentStatus as DriverStatus];
-      if (!allowedNext || !allowedNext.includes(newStatus)) {
+      if (!ALLOWED_NEXT_STATUSES[ride.status]?.includes(status)) {
         await client.query("ROLLBACK");
-        return res.status(400).json({
-          error: `Cannot transition from ${currentStatus} to ${newStatus}.`,
-        });
+        return res.status(400).json({ error: "Invalid status transition." });
       }
 
       const now = new Date();
+      let waitPriceCents = ride.wait_price_cents ?? 0;
 
-      let arrivedAt = ride.arrived_at
-        ? new Date(ride.arrived_at)
-        : null;
-      let inProgressAt = ride.in_progress_at
-        ? new Date(ride.in_progress_at)
-        : null;
-      let completedAt = ride.completed_at
-        ? new Date(ride.completed_at)
-        : null;
-      let noShowAt = ride.no_show_at
-        ? new Date(ride.no_show_at)
-        : null;
-
-      if (newStatus === "driver_en_route") {
-        // Nothing special for now; just status transition
-      } else if (newStatus === "arrived") {
-        arrivedAt = now;
-      } else if (newStatus === "in_progress") {
-        if (!arrivedAt) {
-          arrivedAt = now;
-        }
-        inProgressAt = now;
-      } else if (newStatus === "completed") {
-        if (!inProgressAt) {
-          inProgressAt = now;
-        }
-        completedAt = now;
-      } else if (newStatus === "no_show") {
-        noShowAt = now;
+      if (status === "arrived") {
+        const pickupTime = new Date(ride.pickup_time);
+        const diffMs = now.getTime() - pickupTime.getTime();
+        const diffMinutes = Math.max(0, diffMs / 60000);
+        const extraMinutes = Math.max(0, diffMinutes - FREE_WAIT_MINUTES);
+        waitPriceCents += Math.round(extraMinutes * WAIT_PRICE_PER_MIN_CENTS);
       }
 
-      // Wait time billing logic when transitioning from arrived → in_progress|no_show
-      let waitMinutes = ride.wait_minutes ?? 0;
-      let waitChargeCents = ride.wait_charge_cents ?? 0;
+      let arrivedAt = ride.arrived_at;
+      let inProgressAt = ride.in_progress_at;
+      let completedAt = ride.completed_at;
+      let noShowAt = ride.no_show_at;
 
-      if (arrivedAt && newStatus === "in_progress") {
-        const diffMs = now.getTime() - arrivedAt.getTime();
-        const diffMin = Math.max(0, Math.round(diffMs / 60_000));
-        if (diffMin > FREE_WAIT_MINUTES) {
-          const billable = diffMin - FREE_WAIT_MINUTES;
-          waitMinutes = diffMin;
-          waitChargeCents = billable * WAIT_PRICE_PER_MIN_CENTS;
-        }
+      if (status === "arrived") {
+        arrivedAt = now.toISOString();
+      } else if (status === "in_progress") {
+        inProgressAt = now.toISOString();
+      } else if (status === "completed") {
+        completedAt = now.toISOString();
+      } else if (status === "no_show") {
+        noShowAt = now.toISOString();
       }
 
-      // Persist updates
       const updateRes = await client.query(
         `
         UPDATE rides
         SET
           status = $1,
-          arrived_at = COALESCE($2, arrived_at),
-          in_progress_at = COALESCE($3, in_progress_at),
-          completed_at = COALESCE($4, completed_at),
-          no_show_at = COALESCE($5, no_show_at),
-          wait_minutes = $6,
-          wait_charge_cents = $7
-        WHERE id = $8
+          arrived_at = $2,
+          in_progress_at = $3,
+          completed_at = $4,
+          no_show_at = $5,
+          wait_price_cents = $6
+        WHERE id = $7
         RETURNING *
         `,
         [
-          newStatus,
-          arrivedAt ? arrivedAt.toISOString() : null,
-          inProgressAt ? inProgressAt.toISOString() : null,
-          completedAt ? completedAt.toISOString() : null,
-          noShowAt ? noShowAt.toISOString() : null,
-          waitMinutes,
-          waitChargeCents,
+          status,
+          arrivedAt,
+          inProgressAt,
+          completedAt,
+          noShowAt,
+          waitPriceCents,
           rideId,
         ]
       );
 
-      const updatedRideRow = updateRes.rows[0];
+      const updatedRide = updateRes.rows[0];
 
       await client.query("COMMIT");
 
-      // Notification hook
-      try {
-        await sendRideStatusNotification(
-          ride.user_id,
-          ride.id,
-          newStatus,
-          ride.pickup_time
-        );
-      } catch (notifyErr) {
-        console.warn(
-          "Failed to send ride status notification for ride %s:",
-          rideId,
-          notifyErr
-        );
-      }
+      await sendRideStatusNotification({
+        ride_id: rideId,
+        user_id: ride.user_id,
+        status,
+      });
 
-       // Analytics: ride_completed / ride_cancelled (no_show)
-      try {
-        if (newStatus === "completed") {
-          await logEvent("ride_completed", {
-            rideId,
-            userId: ride.user_id,
-            driverId: userId,
-            waitChargeCents: waitChargeCents ?? 0,
-          });
-        } else if (newStatus === "no_show") {
-          await logEvent("ride_cancelled", {
-            rideId,
-            userId: ride.user_id,
-            driverId: userId,
-            reason: "no_show",
-          });
-        }
-      } catch (logErr) {
-        console.warn(
-          "[analytics] Failed to log driver status event:",
-          newStatus,
-          logErr
-        );
-      }
+      await logEvent("driver_updated_ride_status", {
+        driver_id: userId,
+        ride_id: rideId,
+        status,
+      });
 
       return res.json({
         ok: true,
-        ride: updatedRideRow,
+        ride: updatedRide,
       });
     } catch (err) {
       await client.query("ROLLBACK");
       console.error("Error in POST /driver/rides/:id/status:", err);
-      return res.status(500).json({ error: "Failed to update ride status." });
+      return res
+        .status(500)
+        .json({ error: "Failed to update ride status." });
     } finally {
       client.release();
     }
