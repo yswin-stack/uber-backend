@@ -25,8 +25,8 @@ scheduleRouter.get("/", async (req: Request, res: Response) => {
     }
 
     const result = await pool.query(
-      `SELECT id, day_of_week, direction, arrival_time
-       FROM user_schedules
+      `SELECT id, day_of_week, direction, arrival_time, active
+       FROM user_weekly_schedule
        WHERE user_id = $1
        ORDER BY day_of_week ASC, direction ASC`,
       [userId]
@@ -70,42 +70,45 @@ scheduleRouter.post("/save", async (req: Request, res: Response) => {
     }
 
     // Simple approach: clear all existing schedules and reinsert.
-    await pool.query("BEGIN");
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
 
-    await pool.query("DELETE FROM user_schedules WHERE user_id = $1", [
-      userId,
-    ]);
+      await client.query("DELETE FROM user_weekly_schedule WHERE user_id = $1", [
+        userId,
+      ]);
 
-    for (const d of days) {
-      const day = d.dayOfWeek;
-      if (day < 0 || day > 6) continue;
+      for (const d of days) {
+        const day = d.dayOfWeek;
+        if (day < 0 || day > 6) continue;
 
-      if (d.toWorkTime) {
-        await pool.query(
-          `INSERT INTO user_schedules (user_id, day_of_week, direction, arrival_time)
-           VALUES ($1, $2, $3, $4)`,
-          [userId, day, "to_work", d.toWorkTime]
-        );
+        if (d.toWorkTime) {
+          await client.query(
+            `INSERT INTO user_weekly_schedule (user_id, day_of_week, direction, arrival_time, active)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [userId, day, "to_work", d.toWorkTime, true]
+          );
+        }
+        if (d.toHomeTime) {
+          await client.query(
+            `INSERT INTO user_weekly_schedule (user_id, day_of_week, direction, arrival_time, active)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [userId, day, "to_home", d.toHomeTime, true]
+          );
+        }
       }
-      if (d.toHomeTime) {
-        await pool.query(
-          `INSERT INTO user_schedules (user_id, day_of_week, direction, arrival_time)
-           VALUES ($1, $2, $3, $4)`,
-          [userId, day, "to_home", d.toHomeTime]
-        );
-      }
+
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
     }
-
-    await pool.query("COMMIT");
 
     return res.json({ ok: true });
   } catch (err) {
     console.error("Error in POST /schedule/save:", err);
-    try {
-      await pool.query("ROLLBACK");
-    } catch (e) {
-      console.error("Rollback error:", e);
-    }
     return res.status(500).json({ error: "Internal server error." });
   }
 });
