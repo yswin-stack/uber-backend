@@ -5,7 +5,11 @@ CREATE TABLE IF NOT EXISTS users (
   email TEXT UNIQUE NOT NULL,
   full_name TEXT,
   role TEXT NOT NULL DEFAULT 'subscriber',
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  onboarding_completed BOOLEAN NOT NULL DEFAULT FALSE,
+  onboarding_skipped BOOLEAN NOT NULL DEFAULT FALSE,
+  driver_is_online BOOLEAN NOT NULL DEFAULT FALSE,
+  driver_last_online_at TIMESTAMPTZ
 );
 
 CREATE TABLE IF NOT EXISTS subscriptions (
@@ -14,8 +18,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (
   start_date DATE NOT NULL,
   end_date DATE NOT NULL,
   status TEXT NOT NULL DEFAULT 'active',
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
+...
 
 CREATE TABLE IF NOT EXISTS rides (
   id SERIAL PRIMARY KEY,
