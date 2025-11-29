@@ -1,4 +1,5 @@
 import { pool } from "../db/pool";
+import { sendSms } from "./notifications";
 
 /**
  * We keep simple in-memory sets to avoid sending repeated
@@ -38,8 +39,7 @@ async function getUserPhone(userId: number): Promise<string | null> {
 }
 
 /**
- * Right now we keep SMS as a stub: log out the message.
- * In production you'll plug in Twilio or your SMS provider here.
+ * Send SMS to user using the Twilio-enabled notifications service
  */
 async function sendProximitySmsToUser(
   userId: number,
@@ -54,15 +54,9 @@ async function sendProximitySmsToUser(
     return;
   }
 
-  // TODO: Plug in Twilio or other SMS provider.
-  // Example:
-  // await twilioClient.messages.create({ to: phone, from: TWILIO_FROM, body });
-
-  console.log("[rideProximity] Would send SMS:", {
-    userId,
-    phone,
-    body,
-  });
+  // Use the Twilio-enabled SMS sender
+  await sendSms(phone, body);
+  console.log("[rideProximity] SMS sent:", { userId, phone, body });
 }
 
 /**
@@ -78,7 +72,7 @@ async function sendProximityNotification(args: {
   if (kind === "five_min") {
     await sendProximitySmsToUser(
       userId,
-      "Your driver will be at your pickup in about 5 minutes."
+      "🚗 Your driver is about 5 minutes away! Please head to your pickup point now."
     );
     fiveMinNotified.add(rideId);
     return;
@@ -87,7 +81,7 @@ async function sendProximityNotification(args: {
   if (kind === "arrival_now") {
     await sendProximitySmsToUser(
       userId,
-      "Your driver is now at your pickup point. Please head outside. Driver will wait about 5 minutes before leaving."
+      "🚗 Your driver has arrived! Please come out now. Driver will wait up to 5 minutes. Wait time charges may apply after 2 minutes."
     );
     arrivalNotified.add(rideId);
     return;
