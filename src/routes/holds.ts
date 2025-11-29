@@ -151,7 +151,7 @@ holdsRouter.post('/:holdId/confirm', requireAuth, async (req: Request, res: Resp
         user.id,
         parseInt(result.ride!.id, 10),
         'booking_confirmed',
-   result.ride!.pickupTime || null
+        result.ride!.pickupTime || null
       );
     } catch (notifyErr) {
       console.warn('Failed to send booking confirmation:', notifyErr);
