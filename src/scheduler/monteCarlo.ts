@@ -54,6 +54,7 @@ const DRIVER_HOME_BASE: Location = { lat: 49.8075, lng: -97.1325 };
 
 /**
  * Run a single simulation of the day's schedule
+ * FIXED: Now tracks cumulative delay cascading between rides
  */
 export function runSingleSimulation(
   rides: ScheduledRide[],
@@ -96,6 +97,10 @@ export function runSingleSimulation(
   let nonPremiumTotal = 0;
   let maxLateness = 0;
   
+  // FIXED: Track cumulative delay that cascades to subsequent rides
+  let cumulativeDelayMinutes = 0;
+  let consecutiveLateCount = 0;
+  
   for (const ride of sortedRides) {
     // Get time context
     const ctx = createTimeContextFromStrings(date, minutesToTime(currentTimeMinutes), scenario.weather);
@@ -114,7 +119,8 @@ export function runSingleSimulation(
     const riderDelay = sampleRiderReadyDelay(riderStats, riderDelayVariance);
     
     if (riderDelay.isNoShow) {
-      // Skip this ride (no-show)
+      // Skip this ride (no-show) - this actually helps catch up!
+      cumulativeDelayMinutes = Math.max(0, cumulativeDelayMinutes - 5);
       continue;
     }
     
@@ -136,6 +142,24 @@ export function runSingleSimulation(
     // Check if on time
     const latenessMinutes = Math.max(0, currentTimeMinutes - deadlineMinutes);
     const wasOnTime = currentTimeMinutes <= deadlineMinutes;
+    
+    // FIXED: Track cumulative delay cascading
+    if (!wasOnTime) {
+      cumulativeDelayMinutes += latenessMinutes;
+      consecutiveLateCount++;
+      
+      // Log cascade effect if this is causing problems
+      if (consecutiveLateCount >= 2 && cumulativeDelayMinutes > 10) {
+        console.log(
+          `[MonteCarlo] Delay cascade detected: ${consecutiveLateCount} consecutive late rides, ` +
+          `cumulative delay: ${cumulativeDelayMinutes.toFixed(1)} min`
+        );
+      }
+    } else {
+      // If on time, we're catching up
+      cumulativeDelayMinutes = Math.max(0, cumulativeDelayMinutes - 2);
+      consecutiveLateCount = 0;
+    }
     
     // Update counters
     if (ride.planType === 'premium') {
