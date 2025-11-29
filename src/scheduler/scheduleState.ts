@@ -30,12 +30,12 @@ export async function getScheduleStateForDate(date: string): Promise<ScheduleSta
       DATE(pickup_time)::text as date,
       slot_id,
       COALESCE(plan_type, 'standard') as plan_type,
-      TO_CHAR(arrival_window_start AT TIME ZONE 'America/Winnipeg', 'HH24:MI') as arrival_start,
-      TO_CHAR(arrival_window_end AT TIME ZONE 'America/Winnipeg', 'HH24:MI') as arrival_end,
-      pickup_lat as origin_lat,
-      pickup_lng as origin_lng,
-      drop_lat as dest_lat,
-      drop_lng as dest_lng,
+      COALESCE(TO_CHAR(arrival_window_start AT TIME ZONE 'America/Winnipeg', 'HH24:MI'), TO_CHAR(pickup_time AT TIME ZONE 'America/Winnipeg', 'HH24:MI')) as arrival_start,
+      COALESCE(TO_CHAR(arrival_window_end AT TIME ZONE 'America/Winnipeg', 'HH24:MI'), TO_CHAR(pickup_time AT TIME ZONE 'America/Winnipeg', 'HH24:MI')) as arrival_end,
+      COALESCE(pickup_lat, 49.8951) as origin_lat,
+      COALESCE(pickup_lng, -97.1384) as origin_lng,
+      COALESCE(drop_lat, 49.8075) as dest_lat,
+      COALESCE(drop_lng, -97.1325) as dest_lng,
       pickup_location as origin_address,
       dropoff_location as dest_address,
       pickup_time,
@@ -44,7 +44,7 @@ export async function getScheduleStateForDate(date: string): Promise<ScheduleSta
     WHERE 
       DATE(pickup_time) = $1
       AND status NOT IN ('cancelled', 'cancelled_by_user', 'cancelled_by_admin', 'cancelled_by_driver', 'no_show')
-    ORDER BY arrival_window_start ASC
+    ORDER BY arrival_window_start ASC NULLS LAST
     `,
     [date]
   );
@@ -55,15 +55,15 @@ export async function getScheduleStateForDate(date: string): Promise<ScheduleSta
     date: row.date,
     slotId: row.slot_id,
     planType: row.plan_type as PlanType,
-    arrivalStart: row.arrival_start,
-    arrivalEnd: row.arrival_end,
+    arrivalStart: row.arrival_start || '09:00',
+    arrivalEnd: row.arrival_end || '09:05',
     originLocation: {
-      lat: row.origin_lat,
-      lng: row.origin_lng,
+      lat: parseFloat(row.origin_lat) || 49.8951,
+      lng: parseFloat(row.origin_lng) || -97.1384,
     },
     destinationLocation: {
-      lat: row.dest_lat,
-      lng: row.dest_lng,
+      lat: parseFloat(row.dest_lat) || 49.8075,
+      lng: parseFloat(row.dest_lng) || -97.1325,
     },
     originAddress: row.origin_address,
     destinationAddress: row.dest_address,
