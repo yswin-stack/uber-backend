@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS users (
   phone TEXT UNIQUE,
   name TEXT,
   full_name TEXT,
-  role TEXT NOT NULL DEFAULT 'rider',
+  role TEXT NOT NULL DEFAULT 'subscriber',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   onboarding_completed BOOLEAN NOT NULL DEFAULT FALSE,
   onboarding_skipped BOOLEAN NOT NULL DEFAULT FALSE,
