@@ -221,7 +221,7 @@ function sortByProximity(options: TimeWindowOption[], desiredArrival: string): v
     }
     
     // Then prefer lower risk
-    const riskOrder = { low: 0, medium: 1, high: 2 };
+    const riskOrder: Record<'low' | 'medium' | 'high', number> = { low: 0, medium: 1, high: 2 };
     return riskOrder[a.risk] - riskOrder[b.risk];
   });
 }
@@ -373,8 +373,8 @@ export async function getAvailabilitySummary(
   return {
     totalSlots: filtered.length,
     availableSlots: available.length,
-    peakSlots: filtered.filter(s => s.slotType === 'peak').length,
-    offPeakSlots: filtered.filter(s => s.slotType === 'off_peak').length,
+    peakSlots: filtered.filter((s: TimeSlot) => s.slotType === 'peak').length,
+    offPeakSlots: filtered.filter((s: TimeSlot) => s.slotType === 'off_peak').length,
     byHour: Array.from(byHourMap.entries())
       .map(([hour, data]) => ({ hour, ...data }))
       .sort((a, b) => a.hour.localeCompare(b.hour)),
