@@ -210,8 +210,9 @@ function filterNearbySlots(slots: TimeSlot[], desiredArrival: string): TimeSlot[
  */
 function sortByProximity(options: TimeWindowOption[], desiredArrival: string): void {
   const desiredMins = timeToMinutes(desiredArrival);
+  const riskOrder: Record<'low' | 'medium' | 'high', number> = { low: 0, medium: 1, high: 2 };
   
-  options.sort((a, b) => {
+  options.sort((a: TimeWindowOption, b: TimeWindowOption) => {
     const aDiff = Math.abs(timeToMinutes(a.arrivalStart) - desiredMins);
     const bDiff = Math.abs(timeToMinutes(b.arrivalStart) - desiredMins);
     
@@ -221,7 +222,6 @@ function sortByProximity(options: TimeWindowOption[], desiredArrival: string): v
     }
     
     // Then prefer lower risk
-    const riskOrder: Record<'low' | 'medium' | 'high', number> = { low: 0, medium: 1, high: 2 };
     return riskOrder[a.risk] - riskOrder[b.risk];
   });
 }
