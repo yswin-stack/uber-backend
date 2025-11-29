@@ -22,18 +22,31 @@ import { DEFAULT_SCHEDULING_CONFIG } from '../shared/schedulingTypes';
 // =============================================================================
 
 // Base speed assumptions (km/h)
-const BASE_SPEED_KMH = 35;           // Average urban speed
-const MIN_SPEED_KMH = 15;            // Heavy traffic
-const MAX_SPEED_KMH = 50;            // Free-flowing traffic
+// FIXED: Reduced from 35 to 28 km/h for more realistic city driving
+const BASE_SPEED_KMH = 28;           // Average urban speed with stops/lights
+const MIN_SPEED_KMH = 12;            // Heavy traffic
+const MAX_SPEED_KMH = 45;            // Free-flowing traffic
+
+// FIXED: Road distance factor - roads are ~1.3x longer than straight-line
+const ROAD_DISTANCE_FACTOR = 1.3;
+
+// FIXED: Pembina Highway corridor coordinates (heavy traffic zone)
+const PEMBINA_HWY_CORRIDOR = {
+  minLat: 49.80,
+  maxLat: 49.90,
+  minLng: -97.16,
+  maxLng: -97.13,
+};
 
 // Traffic multipliers by hour (0-23)
 // Higher = more travel time
+// FIXED: Increased peak hour multipliers for Winnipeg reality
 const HOURLY_TRAFFIC_MULTIPLIERS: Record<number, number> = {
   0: 0.8, 1: 0.8, 2: 0.8, 3: 0.8, 4: 0.8, 5: 0.85,
-  6: 0.95, 7: 1.25, 8: 1.4, 9: 1.3,  // Morning rush
-  10: 1.0, 11: 1.0, 12: 1.1, 13: 1.05, 14: 1.0,
-  15: 1.15, 16: 1.35, 17: 1.45, 18: 1.3,  // Evening rush
-  19: 1.1, 20: 1.0, 21: 0.95, 22: 0.9, 23: 0.85,
+  6: 1.0, 7: 1.35, 8: 1.5, 9: 1.4,  // Morning rush - INCREASED
+  10: 1.05, 11: 1.0, 12: 1.15, 13: 1.1, 14: 1.05,
+  15: 1.25, 16: 1.45, 17: 1.55, 18: 1.4,  // Evening rush - INCREASED
+  19: 1.15, 20: 1.0, 21: 0.95, 22: 0.9, 23: 0.85,
 };
 
 // Weather multipliers
@@ -60,9 +73,9 @@ const DAY_OF_WEEK_MULTIPLIERS: Record<number, number> = {
 // =============================================================================
 
 /**
- * Calculate distance between two points using Haversine formula
+ * Calculate straight-line distance using Haversine formula
  */
-export function estimateDistanceKm(origin: Location, destination: Location): number {
+function haversineDistanceKm(origin: Location, destination: Location): number {
   const R = 6371; // Earth radius in km
   const toRad = (value: number) => (value * Math.PI) / 180;
 
@@ -78,6 +91,37 @@ export function estimateDistanceKm(origin: Location, destination: Location): num
 
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
+}
+
+/**
+ * Check if a route passes through the Pembina Highway corridor
+ * This is a heavy traffic zone near University of Manitoba
+ */
+function isInPembinaCoridor(origin: Location, destination: Location): boolean {
+  // Check if either endpoint is in the Pembina corridor
+  const originInCorridor = 
+    origin.lat >= PEMBINA_HWY_CORRIDOR.minLat &&
+    origin.lat <= PEMBINA_HWY_CORRIDOR.maxLat &&
+    origin.lng >= PEMBINA_HWY_CORRIDOR.minLng &&
+    origin.lng <= PEMBINA_HWY_CORRIDOR.maxLng;
+    
+  const destInCorridor = 
+    destination.lat >= PEMBINA_HWY_CORRIDOR.minLat &&
+    destination.lat <= PEMBINA_HWY_CORRIDOR.maxLat &&
+    destination.lng >= PEMBINA_HWY_CORRIDOR.minLng &&
+    destination.lng <= PEMBINA_HWY_CORRIDOR.maxLng;
+    
+  return originInCorridor || destInCorridor;
+}
+
+/**
+ * Calculate estimated road distance between two points
+ * FIXED: Applies road factor to convert straight-line to actual road distance
+ */
+export function estimateDistanceKm(origin: Location, destination: Location): number {
+  const straightLine = haversineDistanceKm(origin, destination);
+  // Apply road distance factor (roads are ~1.3x longer than straight line)
+  return straightLine * ROAD_DISTANCE_FACTOR;
 }
 
 // =============================================================================
@@ -108,6 +152,29 @@ export function getTrafficMultiplier(ctx: TimeContext): number {
   const weatherMult = ctx.weather ? WEATHER_MULTIPLIERS[ctx.weather] : 1.0;
   
   return hourlyMult * dayMult * weatherMult;
+}
+
+/**
+ * Get traffic multiplier with location awareness
+ * FIXED: Adds extra multiplier for Pembina Highway corridor during peak hours
+ */
+export function getTrafficMultiplierWithLocation(
+  ctx: TimeContext,
+  origin: Location,
+  destination: Location
+): number {
+  const baseMult = getTrafficMultiplier(ctx);
+  
+  // Check if route is in Pembina Highway corridor
+  if (isInPembinaCoridor(origin, destination)) {
+    const hour = parseHour(ctx.time);
+    // Add extra 0.2 multiplier during peak hours on Pembina
+    if ((hour >= 7 && hour < 10) || (hour >= 15 && hour < 18)) {
+      return baseMult + 0.2;
+    }
+  }
+  
+  return baseMult;
 }
 
 // =============================================================================
