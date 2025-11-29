@@ -2,7 +2,7 @@ import type { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import { fail } from "../lib/apiResponse";
 
-export type Role = "subscriber" | "driver" | "admin";
+export type Role = "subscriber" | "rider" | "driver" | "admin";
 
 interface JwtPayload {
   id: number;
@@ -44,6 +44,7 @@ export function authMiddleware(
 
           if (
             decodedRole === "subscriber" ||
+            decodedRole === "rider" ||
             decodedRole === "driver" ||
             decodedRole === "admin"
           ) {
@@ -69,6 +70,7 @@ export function authMiddleware(
           if (!Number.isNaN(id)) {
             let role: Role = "subscriber";
             const legacyRole = req.header("x-user-role");
+            if (legacyRole === "rider") role = "rider";
             if (legacyRole === "driver") role = "driver";
             if (legacyRole === "admin") role = "admin";
 
