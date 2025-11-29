@@ -7,7 +7,13 @@
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true
+    "forceConsistentCasingInFileNames": false,
+    "baseUrl": "src",
+    "paths": {
+      "@scheduler/*": ["scheduler/*"],
+      "@shared/*": ["shared/*"]
+    },
+    "resolveJsonModule": true
   },
   "include": ["src/**/*"],
   "exclude": [
