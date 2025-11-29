@@ -347,7 +347,7 @@ export async function getCapacityAlerts(date: string): Promise<Array<{
   
   // Check for fragile slots
   const slots = await getSlotsForDate(date);
-  const fragileSlots = slots.filter(s => s.fragile);
+  const fragileSlots = slots.filter((s: TimeSlot) => s.fragile);
   
   if (fragileSlots.length > 0) {
     alerts.push({
@@ -383,7 +383,7 @@ export async function exportCapacityData(date: string): Promise<{
     'Fragile',
   ];
   
-  const rows = slots.map(slot => [
+  const rows = slots.map((slot: TimeSlot) => [
     slot.slotId,
     `${slot.arrivalStart}-${slot.arrivalEnd}`,
     slot.slotType,
