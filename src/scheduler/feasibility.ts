@@ -335,7 +335,7 @@ export async function batchFeasibilityCheck(
   for (const slot of slots) {
     // Get rides in this slot's block
     const block = getBlockForTime(slot.arrivalStart);
-    const ridesInBlock = state.rides.filter(ride => {
+    const ridesInBlock = state.rides.filter((ride: ScheduledRide) => {
       const rideTime = timeToMinutes(ride.arrivalStart);
       const blockStart = timeToMinutes(block.start);
       const blockEnd = timeToMinutes(block.end);
