@@ -111,7 +111,7 @@ function organizeOffPeakBlocks(slots: TimeSlot[]): AdminCapacityView['offPeakBlo
   if (offPeakSlots.length === 0) return [];
   
   // Sort by time
-  offPeakSlots.sort((a, b) => 
+  offPeakSlots.sort((a: TimeSlot, b: TimeSlot) => 
     timeToMinutes(a.arrivalStart) - timeToMinutes(b.arrivalStart)
   );
   
@@ -291,7 +291,7 @@ export async function getSimulationHistory(
     [date, limit]
   );
   
-  return result.rows.map(row => ({
+  return result.rows.map((row: any) => ({
     jobId: row.job_id,
     status: row.status,
     createdAt: row.created_at,
