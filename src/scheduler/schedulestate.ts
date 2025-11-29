@@ -87,7 +87,7 @@ export async function getRidesInTimeBlock(
 ): Promise<ScheduledRide[]> {
   const state = await getScheduleStateForDate(date);
   
-  return state.rides.filter(ride => {
+  return state.rides.filter((ride: ScheduledRide) => {
     const rideStart = timeToMinutes(ride.arrivalStart);
     const rideEnd = timeToMinutes(ride.arrivalEnd);
     const blockStartMins = timeToMinutes(blockStart);
@@ -157,7 +157,7 @@ export async function getRidesForSlot(slotId: string): Promise<ScheduledRide[]> 
  */
 export async function getPremiumRidesForDate(date: string): Promise<ScheduledRide[]> {
   const state = await getScheduleStateForDate(date);
-  return state.rides.filter(r => r.planType === 'premium');
+  return state.rides.filter((r: ScheduledRide) => r.planType === 'premium');
 }
 
 /**
@@ -165,7 +165,7 @@ export async function getPremiumRidesForDate(date: string): Promise<ScheduledRid
  */
 export async function getNonPremiumRidesForDate(date: string): Promise<ScheduledRide[]> {
   const state = await getScheduleStateForDate(date);
-  return state.rides.filter(r => r.planType !== 'premium');
+  return state.rides.filter((r: ScheduledRide) => r.planType !== 'premium');
 }
 
 // =============================================================================
@@ -365,7 +365,7 @@ export async function findConflictingRides(
   
   const targetTime = timeToMinutes(arrivalStart);
   
-  return state.rides.filter(ride => {
+  return state.rides.filter((ride: ScheduledRide) => {
     if (ride.riderId !== riderId) return false;
     
     const rideTime = timeToMinutes(ride.arrivalStart);
