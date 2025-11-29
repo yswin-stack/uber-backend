@@ -300,7 +300,7 @@ export async function autoBalanceNonPremiumCapacity(
   targetCapacity: number
 ): Promise<void> {
   const slots = await getSlotsForDate(date);
-  const offPeakSlots = slots.filter(s => s.slotType === 'off_peak');
+  const offPeakSlots = slots.filter((s: TimeSlot) => s.slotType === 'off_peak');
   
   if (offPeakSlots.length === 0) return;
   
@@ -484,7 +484,7 @@ export async function getCapacityUtilizationReport(
     [startDate, endDate]
   );
   
-  return result.rows.map(row => ({
+  return result.rows.map((row: any) => ({
     date: row.date,
     premiumUtilization: row.premium_capacity > 0 
       ? row.premium_booked_count / row.premium_capacity 
