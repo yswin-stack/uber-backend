@@ -1155,14 +1155,65 @@ meRouter.post(
           onboarding_skipped: true,
         })
       );
-    } catch (err) {
+    } catch (err: any) {
       console.error("Error in POST /me/onboarding/skip:", err);
+      console.error("Error details:", err?.message, err?.code);
       return res
         .status(500)
         .json(
           fail(
             "ONBOARDING_SKIP_FAILED",
-            "Failed to skip onboarding for user."
+            `Failed to skip onboarding: ${err?.message || "Unknown error"}`
+          )
+        );
+    }
+  }
+);
+
+/**
+ * --------------------------------------------------
+ *  POST /me/onboarding/complete
+ *  Mark onboarding as completed for the current user.
+ * --------------------------------------------------
+ */
+meRouter.post(
+  "/onboarding/complete",
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const authUser = req.user;
+    if (!authUser) {
+      return res
+        .status(401)
+        .json(
+          fail("UNAUTHENTICATED", "Please log in to complete onboarding.")
+        );
+    }
+
+    const userId = authUser.id;
+
+    try {
+      await pool.query(
+        `
+        UPDATE users
+        SET onboarding_completed = TRUE
+        WHERE id = $1
+        `,
+        [userId]
+      );
+
+      return res.json(
+        ok({
+          onboarding_completed: true,
+        })
+      );
+    } catch (err: any) {
+      console.error("Error in POST /me/onboarding/complete:", err);
+      return res
+        .status(500)
+        .json(
+          fail(
+            "ONBOARDING_COMPLETE_FAILED",
+            `Failed to complete onboarding: ${err?.message || "Unknown error"}`
           )
         );
     }
