@@ -20,10 +20,13 @@ import { pool } from '../db/pool';
 // Default Statistics
 // =============================================================================
 
+// FIXED: Added minimum walk time for building exit (elevators, walking to curb)
+const MIN_RIDER_WALK_TIME = 1.5;  // minutes
+
 const DEFAULT_RIDER_STATS: RiderBehaviorStats = {
-  expectedReadyDelayMinutes: 2,      // Average 2 min late to pickup
+  expectedReadyDelayMinutes: 2 + MIN_RIDER_WALK_TIME,  // FIXED: Added walk time
   stdReadyDelayMinutes: 1.5,         // Standard deviation
-  p95ReadyDelayMinutes: 5,           // 95th percentile delay
+  p95ReadyDelayMinutes: 5 + MIN_RIDER_WALK_TIME,  // FIXED: Added walk time
   noShowProbability: 0.05,           // 5% no-show rate
   reliabilityScore: 0.9,             // 90% base reliability
 };
