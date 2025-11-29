@@ -16,6 +16,9 @@ import userRouter from "./routes/user";
 import driverRouter from "./routes/driver";
 import { meRouter } from "./routes/me";
 import { plansRouter } from "./routes/plans";
+import { availabilityRouter } from "./routes/availability";
+import { holdsRouter } from "./routes/holds";
+import { capacityRouter } from "./routes/capacity";
 import { initDb } from "./db/init";
 import { setupTrackingSockets } from "./sockets/tracking";
 import { notFoundHandler, errorHandler } from "./middleware/errorHandler";
@@ -59,6 +62,9 @@ app.use("/user", userRouter);
 app.use("/driver", driverRouter);
 app.use("/me", meRouter);
 app.use("/plans", plansRouter);
+app.use("/availability", availabilityRouter);
+app.use("/holds", holdsRouter);
+app.use("/admin/capacity", capacityRouter);
 
 // 404 + error handlers (must be after all routes)
 app.use(notFoundHandler);
