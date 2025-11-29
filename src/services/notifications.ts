@@ -51,10 +51,11 @@ export async function sendSms(to: string, message: string): Promise<void> {
 }
 
 // Events around a ride lifecycle that we care about for notifications.
-// These include both actual statuses and synthetic "booking_confirmed".
+// These include both actual statuses and synthetic events.
 export type RideStatusNotificationEvent =
   | "booking_confirmed"
   | "driver_en_route"
+  | "driver_5_mins_away"
   | "arrived"
   | "in_progress"
   | "completed"
@@ -96,12 +97,14 @@ function buildRideStatusMessage(
       return `Your ride is booked${timePart}. We'll send updates as your driver heads out.`;
     case "driver_en_route":
       return `Your driver is on the way${timePart}. Please be ready at your pickup point.`;
+    case "driver_5_mins_away":
+      return `Your driver is about 5 minutes away! Please head to your pickup point now.`;
     case "arrived":
-      return `Your driver has arrived${timePart}. Please head to the pickup point.`;
+      return `Your driver has arrived! 🚗 Please come out now. Driver will wait up to 5 minutes. Wait time charges may apply after 2 minutes.`;
     case "in_progress":
-      return `You are now on your ride.`;
+      return `You're on your way! 🚗 Please buckle up - we care about your safety! 😊`;
     case "completed":
-      return `Your ride is complete. Thank you for riding with us.`;
+      return `Ride complete! ✅ Thank you for riding with us. We'd love your feedback - rate your ride in the app!`;
     case "cancelled_by_user":
       return `Your ride has been cancelled as requested.`;
     case "cancelled_by_admin":
@@ -112,6 +115,20 @@ function buildRideStatusMessage(
       return `Your driver waited but could not find you. This ride was marked as a no-show.`;
     default:
       return `There's an update on your ride.`;
+  }
+}
+
+/**
+ * Send a proximity alert when driver is close to pickup
+ * Called from the location tracking socket when driver is within threshold
+ */
+export async function sendProximityAlert(
+  userId: number,
+  rideId: number,
+  minutesAway: number
+): Promise<void> {
+  if (minutesAway <= 5 && minutesAway > 0) {
+    await sendRideStatusNotification(userId, rideId, "driver_5_mins_away", null);
   }
 }
 
