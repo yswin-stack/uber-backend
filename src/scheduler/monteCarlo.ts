@@ -60,7 +60,17 @@ export function runSingleSimulation(
   date: string,
   scenario: SimulationScenario
 ): SimulationRunResult {
-  if (rides.length === 0) {
+  // Filter out rides with missing required data
+  const validRides = rides.filter(ride => 
+    ride.arrivalStart && 
+    ride.arrivalEnd && 
+    ride.originLocation?.lat != null && 
+    ride.originLocation?.lng != null &&
+    ride.destinationLocation?.lat != null &&
+    ride.destinationLocation?.lng != null
+  );
+  
+  if (validRides.length === 0) {
     return {
       runIndex: 0,
       rides: [],
@@ -72,7 +82,7 @@ export function runSingleSimulation(
     };
   }
   
-  const sortedRides = sortRidesByArrival(rides);
+  const sortedRides = sortRidesByArrival(validRides);
   const varianceLevel = scenario.trafficVariance || 'medium';
   const riderDelayVariance = scenario.riderDelayVariance || 'medium';
   
