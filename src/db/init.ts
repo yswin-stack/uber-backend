@@ -26,6 +26,44 @@ export async function initDb() {
       ON users(phone);
     `);
 
+    // Add default pickup address fields to users
+    await client.query(`
+      ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS default_pickup_address TEXT;
+    `);
+    await client.query(`
+      ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS default_pickup_lat DOUBLE PRECISION;
+    `);
+    await client.query(`
+      ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS default_pickup_lng DOUBLE PRECISION;
+    `);
+    await client.query(`
+      ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS address_validated BOOLEAN NOT NULL DEFAULT FALSE;
+    `);
+    await client.query(`
+      ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS address_zone_id INTEGER REFERENCES service_zones(id);
+    `);
+    await client.query(`
+      ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS onboarding_completed BOOLEAN NOT NULL DEFAULT FALSE;
+    `);
+    await client.query(`
+      ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS onboarding_skipped BOOLEAN NOT NULL DEFAULT FALSE;
+    `);
+    await client.query(`
+      ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS driver_is_online BOOLEAN NOT NULL DEFAULT FALSE;
+    `);
+    await client.query(`
+      ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS driver_last_online_at TIMESTAMPTZ;
+    `);
+
     //
     // SUBSCRIPTIONS – simple monthly periods for now
     //
