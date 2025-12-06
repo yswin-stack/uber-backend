@@ -13,6 +13,112 @@ export const routingRouter = Router();
  * Simple point-in-polygon check using ray casting algorithm
  * No external dependencies needed
  */
+function isPointInPolygonCoords(point: { lng: number; lat: number }, coordinates: number[][][]): boolean {
+  if (!coordinates || !coordinates[0]) return false;
+
+  const ring = coordinates[0]; // Outer ring
+  let inside = false;
+  const x = point.lng;
+  const y = point.lat;
+
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const xi = ring[i][0];
+    const yi = ring[i][1];
+    const xj = ring[j][0];
+    const yj = ring[j][1];
+
+    const intersect = yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi;
+    if (intersect) inside = !inside;
+  }
+
+  return inside;
+}
+
+/**
+ * GET /routing/service-zones
+ * Get active service zones (public - no auth required)
+ * Used for displaying zone on maps
+ */
+routingRouter.get("/service-zones", async (_req: Request, res: Response) => {
+  try {
+    const result = await pool.query(`
+      SELECT 
+        id,
+        name,
+        polygon,
+        center_lat as "centerLat",
+        center_lng as "centerLng",
+        campus_lat as "campusLat",
+        campus_lng as "campusLng",
+        campus_name as "campusName"
+      FROM service_zones 
+      WHERE is_active = true
+      ORDER BY name
+    `);
+
+    return res.json({ zones: result.rows });
+  } catch (err) {
+    console.error("Error fetching service zones:", err);
+    return res.status(500).json({ error: "Failed to fetch service zones" });
+  }
+});
+
+/**
+ * GET /routing/active-time-windows
+ * Get active time windows for scheduling (public - requires userId for zone matching)
+ */
+routingRouter.get("/active-time-windows", async (req: Request, res: Response) => {
+  const userId = req.headers["x-user-id"];
+  
+  try {
+    // If userId provided, get user's zone and filter windows
+    let zoneFilter = "";
+    let params: any[] = [];
+    
+    if (userId) {
+      const userResult = await pool.query(
+        `SELECT address_zone_id, default_pickup_lat, default_pickup_lng FROM users WHERE id = $1`,
+        [userId]
+      );
+      
+      if (userResult.rows[0]?.address_zone_id) {
+        zoneFilter = "AND sz.id = $1";
+        params = [userResult.rows[0].address_zone_id];
+      }
+    }
+    
+    const result = await pool.query(`
+      SELECT 
+        tw.id,
+        tw.service_zone_id as "zoneId",
+        sz.name as "zoneName",
+        tw.window_type as "type",
+        tw.label,
+        tw.campus_target_time as "campusTargetTime",
+        tw.start_pickup_time as "startPickupTime",
+        tw.max_riders as "maxRiders"
+      FROM time_windows tw
+      JOIN service_zones sz ON tw.service_zone_id = sz.id
+      WHERE tw.is_active = true AND sz.is_active = true ${zoneFilter}
+      ORDER BY tw.window_type, tw.campus_target_time
+    `, params);
+
+    // Separate into morning (arrival) and evening (departure)
+    const morningWindows = result.rows.filter((w: any) => w.type === 'MORNING');
+    const eveningWindows = result.rows.filter((w: any) => w.type === 'EVENING');
+
+    return res.json({
+      morningWindows,
+      eveningWindows,
+      allWindows: result.rows,
+    });
+  } catch (err) {
+    console.error("Error fetching time windows:", err);
+    return res.status(500).json({ error: "Failed to fetch time windows" });
+  }
+});
+
+/**
 function isPointInPolygon(point: { lng: number; lat: number }, polygon: number[][][]): boolean {
   if (!polygon || !polygon[0]) return false;
 
