@@ -717,4 +717,184 @@ driverRouter.post(
   }
 );
 
+/**
+ * GET /driver/route-plan/today
+ * Get today's route plans for the driver with traffic-aware timing.
+ * Returns all time windows with assignments for today.
+ */
+driverRouter.get("/route-plan/today", async (req: Request, res: Response) => {
+  const userId = getUserIdFromHeader(req);
+  if (!userId) {
+    return res
+      .status(401)
+      .json({ error: "Missing or invalid x-user-id header." });
+  }
+
+  try {
+    await ensureDriverOrAdmin(userId);
+  } catch (err: any) {
+    if (err.message === "user_not_found") {
+      return res.status(404).json({ error: "User not found." });
+    }
+    if (err.message === "forbidden") {
+      return res.status(403).json({ error: "Only drivers/admins can view this." });
+    }
+    return res.status(500).json({ error: "Internal error." });
+  }
+
+  const today = new Date().toISOString().slice(0, 10);
+
+  try {
+    // Get all route plans for today
+    const routePlans = await pool.query(`
+      SELECT 
+        rp.id,
+        rp.service_date as "serviceDate",
+        rp.planned_departure_time as "plannedDepartureTime",
+        rp.ordered_assignment_ids as "orderedAssignmentIds",
+        rp.google_route_polyline as "polyline",
+        rp.google_base_duration_seconds as "durationSeconds",
+        rp.google_total_distance_meters as "distanceMeters",
+        tw.id as "timeWindowId",
+        tw.window_type as "windowType",
+        tw.label as "timeWindowLabel",
+        tw.campus_target_time as "campusTargetTime",
+        sz.name as "zoneName",
+        sz.campus_lat as "campusLat",
+        sz.campus_lng as "campusLng",
+        sz.campus_name as "campusName"
+      FROM route_plans rp
+      JOIN time_windows tw ON rp.time_window_id = tw.id
+      JOIN service_zones sz ON tw.service_zone_id = sz.id
+      WHERE rp.service_date = $1
+        AND array_length(rp.ordered_assignment_ids, 1) > 0
+      ORDER BY rp.planned_departure_time ASC
+    `, [today]);
+
+    // For each route plan, get the pickup stops
+    const plans = [];
+    for (const plan of routePlans.rows) {
+      if (plan.orderedAssignmentIds && plan.orderedAssignmentIds.length > 0) {
+        const stopsResult = await pool.query(`
+          SELECT 
+            wa.id,
+            wa.user_id as "userId",
+            wa.pickup_lat as "lat",
+            wa.pickup_lng as "lng",
+            wa.pickup_address as "address",
+            wa.estimated_pickup_time as "estimatedPickupTime",
+            wa.status,
+            u.name as "riderName",
+            u.phone as "riderPhone"
+          FROM window_assignments wa
+          LEFT JOIN users u ON wa.user_id = u.id
+          WHERE wa.id = ANY($1)
+          ORDER BY array_position($1, wa.id)
+        `, [plan.orderedAssignmentIds]);
+
+        plan.stops = stopsResult.rows;
+      } else {
+        plan.stops = [];
+      }
+
+      plans.push(plan);
+    }
+
+    return res.json({
+      ok: true,
+      date: today,
+      plans,
+    });
+  } catch (err) {
+    console.error("Error in GET /driver/route-plan/today:", err);
+    return res.status(500).json({ error: "Failed to load route plans." });
+  }
+});
+
+/**
+ * GET /driver/route-plan/:timeWindowId/:serviceDate
+ * Get a specific route plan with full details.
+ */
+driverRouter.get(
+  "/route-plan/:timeWindowId/:serviceDate",
+  async (req: Request, res: Response) => {
+    const userId = getUserIdFromHeader(req);
+    if (!userId) {
+      return res.status(401).json({ error: "Missing x-user-id header." });
+    }
+
+    try {
+      await ensureDriverOrAdmin(userId);
+    } catch (err: any) {
+      return res.status(403).json({ error: "Access denied." });
+    }
+
+    const timeWindowId = parseInt(req.params.timeWindowId, 10);
+    const serviceDate = req.params.serviceDate;
+
+    if (Number.isNaN(timeWindowId) || !/^\d{4}-\d{2}-\d{2}$/.test(serviceDate)) {
+      return res.status(400).json({ error: "Invalid parameters." });
+    }
+
+    try {
+      const result = await pool.query(`
+        SELECT 
+          rp.id,
+          rp.service_date as "serviceDate",
+          rp.planned_departure_time as "plannedDepartureTime",
+          rp.ordered_assignment_ids as "orderedAssignmentIds",
+          rp.google_route_polyline as "polyline",
+          rp.google_base_duration_seconds as "durationSeconds",
+          rp.google_total_distance_meters as "distanceMeters",
+          tw.label as "timeWindowLabel",
+          tw.window_type as "windowType",
+          tw.campus_target_time as "campusTargetTime",
+          sz.name as "zoneName",
+          sz.campus_lat as "campusLat",
+          sz.campus_lng as "campusLng",
+          sz.campus_name as "campusName"
+        FROM route_plans rp
+        JOIN time_windows tw ON rp.time_window_id = tw.id
+        JOIN service_zones sz ON tw.service_zone_id = sz.id
+        WHERE rp.time_window_id = $1 AND rp.service_date = $2
+      `, [timeWindowId, serviceDate]);
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({ error: "Route plan not found." });
+      }
+
+      const plan = result.rows[0];
+
+      // Get stops
+      if (plan.orderedAssignmentIds && plan.orderedAssignmentIds.length > 0) {
+        const stopsResult = await pool.query(`
+          SELECT 
+            wa.id,
+            wa.user_id as "userId",
+            wa.pickup_lat as "lat",
+            wa.pickup_lng as "lng",
+            wa.pickup_address as "address",
+            wa.estimated_pickup_time as "estimatedPickupTime",
+            wa.status,
+            u.name as "riderName",
+            u.phone as "riderPhone"
+          FROM window_assignments wa
+          LEFT JOIN users u ON wa.user_id = u.id
+          WHERE wa.id = ANY($1)
+          ORDER BY array_position($1, wa.id)
+        `, [plan.orderedAssignmentIds]);
+
+        plan.stops = stopsResult.rows;
+      } else {
+        plan.stops = [];
+      }
+
+      return res.json({ ok: true, plan });
+    } catch (err) {
+      console.error("Error in GET /driver/route-plan:", err);
+      return res.status(500).json({ error: "Failed to load route plan." });
+    }
+  }
+);
+
 export default driverRouter;
