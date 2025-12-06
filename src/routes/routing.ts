@@ -1,586 +1,273 @@
 /**
- * Routing API Endpoints
- * 
- * Provides endpoints for:
- * - Checking if a rider can be added to a time window
- * - Getting available time windows for a location
- * - Managing service zones
- * - Handling unserved requests
+ * Routing API endpoints
+ * Handles service area checks, time window availability, and ride booking
  */
 
-import { Router, Request, Response } from 'express';
-import { pool } from '../db/pool';
-import { ok, fail } from '../lib/apiResponse';
-import {
-  canAddRiderToWindow,
-  createWindowAssignment,
-  cancelWindowAssignment,
-  findServiceZonesForPoint,
-  getTimeWindowsForZone,
-  getConfirmedRiderCount,
-  getOrCreateRoutePlan,
-  geocodeAddress,
-  isPointInPolygon,
-} from '../lib/routingEngine';
+import { Router, Request, Response } from "express";
+import { pool } from "../db/pool";
+import { canAddRiderToWindow, confirmWindowAssignment } from "../lib/routingEngine";
+import * as turf from "@turf/turf";
 
-const routingRouter = Router();
-
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
-function getUserIdFromHeader(req: Request): number | null {
-  const h = req.header('x-user-id');
-  if (!h) return null;
-  const id = parseInt(h, 10);
-  if (Number.isNaN(id)) return null;
-  return id;
-}
-
-// ============================================================================
-// Check if Rider Can Be Added to Window
-// ============================================================================
-
-/**
- * POST /routing/can-add-to-window
- * 
- * Check if a rider can be added to a specific time window.
- * Uses traffic-aware routing to verify detour constraints.
- * 
- * Body:
- * {
- *   serviceDate: "YYYY-MM-DD",
- *   timeWindowId: number,
- *   pickupLat: number,
- *   pickupLng: number,
- *   pickupAddress?: string
- * }
- */
-routingRouter.post('/can-add-to-window', async (req: Request, res: Response) => {
-  try {
-    const userId = getUserIdFromHeader(req);
-    if (!userId) {
-      return res.status(401).json(fail('UNAUTHORIZED', 'Missing or invalid x-user-id header.'));
-    }
-
-    const { serviceDate, timeWindowId, pickupLat, pickupLng, pickupAddress } = req.body;
-
-    // Validate required fields
-    if (!serviceDate || !timeWindowId || pickupLat === undefined || pickupLng === undefined) {
-      return res.status(400).json(fail(
-        'MISSING_FIELDS',
-        'serviceDate, timeWindowId, pickupLat, and pickupLng are required.'
-      ));
-    }
-
-    // Validate date format
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(serviceDate)) {
-      return res.status(400).json(fail('INVALID_DATE', 'serviceDate must be in YYYY-MM-DD format.'));
-    }
-
-    // Call the routing engine
-    const result = await canAddRiderToWindow({
-      serviceDate,
-      timeWindowId: Number(timeWindowId),
-      pickupLat: Number(pickupLat),
-      pickupLng: Number(pickupLng),
-      pickupAddress,
-    });
-
-    return res.json(ok(result));
-
-  } catch (error) {
-    console.error('Error in POST /routing/can-add-to-window:', error);
-    return res.status(500).json(fail('INTERNAL_ERROR', 'Failed to check window availability.'));
-  }
-});
-
-// ============================================================================
-// Confirm Window Assignment
-// ============================================================================
-
-/**
- * POST /routing/confirm-window
- * 
- * Confirm a rider's assignment to a time window.
- * Creates the assignment and updates the route plan.
- * 
- * Body:
- * {
- *   serviceDate: "YYYY-MM-DD",
- *   timeWindowId: number,
- *   pickupLat: number,
- *   pickupLng: number,
- *   pickupAddress?: string
- * }
- */
-routingRouter.post('/confirm-window', async (req: Request, res: Response) => {
-  try {
-    const userId = getUserIdFromHeader(req);
-    if (!userId) {
-      return res.status(401).json(fail('UNAUTHORIZED', 'Missing or invalid x-user-id header.'));
-    }
-
-    const { serviceDate, timeWindowId, pickupLat, pickupLng, pickupAddress } = req.body;
-
-    // Validate required fields
-    if (!serviceDate || !timeWindowId || pickupLat === undefined || pickupLng === undefined) {
-      return res.status(400).json(fail(
-        'MISSING_FIELDS',
-        'serviceDate, timeWindowId, pickupLat, and pickupLng are required.'
-      ));
-    }
-
-    // First check if the rider can be added
-    const checkResult = await canAddRiderToWindow({
-      serviceDate,
-      timeWindowId: Number(timeWindowId),
-      pickupLat: Number(pickupLat),
-      pickupLng: Number(pickupLng),
-      pickupAddress,
-    });
-
-    if (!checkResult.accepted) {
-      return res.status(400).json(fail(
-        checkResult.reason || 'CANNOT_ADD_RIDER',
-        `Cannot add rider to this window: ${checkResult.reason}`,
-      ));
-    }
-
-    // Create the assignment
-    const assignment = await createWindowAssignment({
-      userId,
-      timeWindowId: Number(timeWindowId),
-      serviceDate,
-      pickupLat: Number(pickupLat),
-      pickupLng: Number(pickupLng),
-      pickupAddress,
-      insertionIndex: checkResult.bestInsertionIndex || 0,
-    });
-
-    return res.json(ok({
-      assignment,
-      estimatedPickupTime: checkResult.estimatedPickupTime,
-      estimatedArrivalTime: checkResult.estimatedArrivalTime,
-    }));
-
-  } catch (error: any) {
-    console.error('Error in POST /routing/confirm-window:', error);
-    
-    // Check for unique constraint violation (already assigned)
-    if (error.code === '23505') {
-      return res.status(400).json(fail(
-        'ALREADY_ASSIGNED',
-        'You are already assigned to this time window for this date.'
-      ));
-    }
-    
-    return res.status(500).json(fail('INTERNAL_ERROR', 'Failed to confirm window assignment.'));
-  }
-});
-
-// ============================================================================
-// Cancel Window Assignment
-// ============================================================================
-
-/**
- * POST /routing/cancel-assignment/:assignmentId
- * 
- * Cancel a window assignment.
- */
-routingRouter.post('/cancel-assignment/:assignmentId', async (req: Request, res: Response) => {
-  try {
-    const userId = getUserIdFromHeader(req);
-    if (!userId) {
-      return res.status(401).json(fail('UNAUTHORIZED', 'Missing or invalid x-user-id header.'));
-    }
-
-    const assignmentId = parseInt(req.params.assignmentId, 10);
-    if (Number.isNaN(assignmentId)) {
-      return res.status(400).json(fail('INVALID_ASSIGNMENT_ID', 'Invalid assignment ID.'));
-    }
-
-    // Verify the assignment belongs to this user
-    const check = await pool.query(`
-      SELECT user_id FROM window_assignments WHERE id = $1
-    `, [assignmentId]);
-
-    if (check.rows.length === 0) {
-      return res.status(404).json(fail('NOT_FOUND', 'Assignment not found.'));
-    }
-
-    if (check.rows[0].user_id !== userId) {
-      return res.status(403).json(fail('FORBIDDEN', 'You can only cancel your own assignments.'));
-    }
-
-    await cancelWindowAssignment(assignmentId);
-
-    return res.json(ok({ cancelled: true }));
-
-  } catch (error) {
-    console.error('Error in POST /routing/cancel-assignment:', error);
-    return res.status(500).json(fail('INTERNAL_ERROR', 'Failed to cancel assignment.'));
-  }
-});
-
-// ============================================================================
-// Get Available Windows for Location
-// ============================================================================
-
-/**
- * GET /routing/available-windows
- * 
- * Get available time windows for a given pickup location.
- * 
- * Query params:
- * - lat: Pickup latitude
- * - lng: Pickup longitude
- * - date: Service date (YYYY-MM-DD)
- * - type?: "MORNING" | "EVENING" (optional filter)
- */
-routingRouter.get('/available-windows', async (req: Request, res: Response) => {
-  try {
-    const { lat, lng, date, type } = req.query;
-
-    if (!lat || !lng || !date) {
-      return res.status(400).json(fail('MISSING_FIELDS', 'lat, lng, and date are required.'));
-    }
-
-    const pickupLat = parseFloat(lat as string);
-    const pickupLng = parseFloat(lng as string);
-    const serviceDate = date as string;
-    const windowType = type as 'MORNING' | 'EVENING' | undefined;
-
-    if (Number.isNaN(pickupLat) || Number.isNaN(pickupLng)) {
-      return res.status(400).json(fail('INVALID_COORDINATES', 'Invalid lat/lng values.'));
-    }
-
-    // Find service zones for this location
-    const zones = await findServiceZonesForPoint({ lat: pickupLat, lng: pickupLng });
-
-    if (zones.length === 0) {
-      return res.json(ok({
-        inServiceArea: false,
-        message: "We don't serve this area yet.",
-        windows: [],
-      }));
-    }
-
-    // Get time windows for all matching zones
-    const allWindows: any[] = [];
-
-    for (const zone of zones) {
-      const windows = await getTimeWindowsForZone(zone.id, windowType);
-      
-      for (const window of windows) {
-        const confirmedCount = await getConfirmedRiderCount(window.id, serviceDate);
-        const availableSeats = window.maxRiders - confirmedCount;
-
-        // Get route plan for timing info
-        const routePlan = await getOrCreateRoutePlan(serviceDate, window.id);
-
-        allWindows.push({
-          id: window.id,
-          zoneId: zone.id,
-          zoneName: zone.name,
-          type: window.windowType,
-          label: window.label,
-          campusTargetTime: window.campusTargetTime,
-          startPickupTime: window.startPickupTime,
-          maxRiders: window.maxRiders,
-          confirmedCount,
-          availableSeats,
-          isFull: availableSeats <= 0,
-          plannedDepartureTime: routePlan.plannedDepartureTime,
-          currentRiderCount: routePlan.orderedAssignmentIds.length,
-        });
-      }
-    }
-
-    // Sort by target time
-    allWindows.sort((a, b) => a.campusTargetTime.localeCompare(b.campusTargetTime));
-
-    return res.json(ok({
-      inServiceArea: true,
-      zones: zones.map(z => ({ id: z.id, name: z.name })),
-      windows: allWindows,
-    }));
-
-  } catch (error) {
-    console.error('Error in GET /routing/available-windows:', error);
-    return res.status(500).json(fail('INTERNAL_ERROR', 'Failed to get available windows.'));
-  }
-});
-
-// ============================================================================
-// Check Service Area
-// ============================================================================
+export const routingRouter = Router();
 
 /**
  * POST /routing/check-service-area
- * 
- * Check if an address or coordinates are in a service area.
- * 
- * Body:
- * {
- *   address?: string,
- *   lat?: number,
- *   lng?: number,
- *   desiredTimeType?: "MORNING" | "EVENING"
- * }
+ * Check if a location is within an active service zone
  */
-routingRouter.post('/check-service-area', async (req: Request, res: Response) => {
+routingRouter.post("/check-service-area", async (req: Request, res: Response) => {
+  const { lat, lng, address } = req.body;
+
+  if (typeof lat !== "number" || typeof lng !== "number") {
+    return res.status(400).json({ error: "lat and lng are required" });
+  }
+
   try {
-    const userId = getUserIdFromHeader(req);
-    const { address, lat, lng, desiredTimeType } = req.body;
+    // Get all active zones
+    const zonesResult = await pool.query(
+      `SELECT id, name, polygon, campus_name as "campusName"
+       FROM service_zones 
+       WHERE is_active = true`
+    );
 
-    let pickupLat = lat ? parseFloat(lat) : null;
-    let pickupLng = lng ? parseFloat(lng) : null;
+    const point = turf.point([lng, lat]);
+    const matchingZones = [];
 
-    // If address provided without coordinates, geocode it
-    if (address && (pickupLat === null || pickupLng === null)) {
-      const geocoded = await geocodeAddress(address);
-      if (geocoded) {
-        pickupLat = geocoded.lat;
-        pickupLng = geocoded.lng;
-      } else {
-        return res.status(400).json(fail('GEOCODING_FAILED', 'Could not geocode the address.'));
-      }
-    }
-
-    if (pickupLat === null || pickupLng === null) {
-      return res.status(400).json(fail('MISSING_LOCATION', 'Either address or lat/lng is required.'));
-    }
-
-    // Find service zones for this location
-    const zones = await findServiceZonesForPoint({ lat: pickupLat, lng: pickupLng });
-
-    if (zones.length === 0) {
-      // Log unserved request if user is logged in
-      if (userId && address) {
+    for (const zone of zonesResult.rows) {
+      if (zone.polygon) {
         try {
-          await pool.query(`
-            INSERT INTO unserved_requests (
-              user_id, entered_address, lat, lng,
-              desired_time_type, reason, waitlist_opt_in
-            )
-            VALUES ($1, $2, $3, $4, $5, 'OUT_OF_ZONE', false)
-          `, [userId, address, pickupLat, pickupLng, desiredTimeType || 'MORNING']);
-        } catch (err) {
-          console.error('Error logging unserved request:', err);
+          const polygon = turf.polygon(zone.polygon.coordinates);
+          if (turf.booleanPointInPolygon(point, polygon)) {
+            matchingZones.push({
+              id: zone.id,
+              name: zone.name,
+              campusName: zone.campusName,
+            });
+          }
+        } catch (e) {
+          console.error(`Invalid polygon for zone ${zone.id}:`, e);
         }
       }
-
-      return res.json(ok({
-        inServiceArea: false,
-        message: "We don't serve this area yet. Join the waitlist to be notified when we expand.",
-        lat: pickupLat,
-        lng: pickupLng,
-      }));
     }
 
-    return res.json(ok({
-      inServiceArea: true,
-      lat: pickupLat,
-      lng: pickupLng,
-      zones: zones.map(z => ({
-        id: z.id,
-        name: z.name,
-        campusName: z.campusName,
-      })),
-    }));
+    if (matchingZones.length > 0) {
+      return res.json({
+        inServiceArea: true,
+        lat,
+        lng,
+        zones: matchingZones,
+      });
+    }
 
-  } catch (error) {
-    console.error('Error in POST /routing/check-service-area:', error);
-    return res.status(500).json(fail('INTERNAL_ERROR', 'Failed to check service area.'));
+    // Log unserved request for expansion analytics
+    if (address) {
+      try {
+        await pool.query(
+          `INSERT INTO unserved_requests (entered_address, lat, lng, desired_time_type, reason)
+           VALUES ($1, $2, $3, 'MORNING', 'OUT_OF_ZONE')`,
+          [address, lat, lng]
+        );
+      } catch (e) {
+        console.error("Failed to log unserved request:", e);
+      }
+    }
+
+    return res.json({
+      inServiceArea: false,
+      lat,
+      lng,
+      message: "This location is outside our current service areas",
+    });
+  } catch (err) {
+    console.error("Error checking service area:", err);
+    return res.status(500).json({ error: "Failed to check service area" });
   }
 });
 
-// ============================================================================
-// Join Waitlist (Unserved Request)
-// ============================================================================
+/**
+ * GET /routing/available-windows
+ * Get available time windows for a location and date
+ */
+routingRouter.get("/available-windows", async (req: Request, res: Response) => {
+  const lat = parseFloat(req.query.lat as string);
+  const lng = parseFloat(req.query.lng as string);
+  const date = req.query.date as string;
+
+  if (isNaN(lat) || isNaN(lng) || !date) {
+    return res.status(400).json({ error: "lat, lng, and date are required" });
+  }
+
+  try {
+    // Find matching zones
+    const zonesResult = await pool.query(
+      `SELECT id, name, polygon
+       FROM service_zones 
+       WHERE is_active = true`
+    );
+
+    const point = turf.point([lng, lat]);
+    let matchingZoneId: number | null = null;
+    let matchingZoneName: string | null = null;
+
+    for (const zone of zonesResult.rows) {
+      if (zone.polygon) {
+        try {
+          const polygon = turf.polygon(zone.polygon.coordinates);
+          if (turf.booleanPointInPolygon(point, polygon)) {
+            matchingZoneId = zone.id;
+            matchingZoneName = zone.name;
+            break;
+          }
+        } catch (e) {
+          console.error(`Invalid polygon for zone ${zone.id}:`, e);
+        }
+      }
+    }
+
+    if (!matchingZoneId) {
+      return res.json({
+        inServiceArea: false,
+        message: "Location is outside service areas",
+      });
+    }
+
+    // Get time windows for the zone
+    const windowsResult = await pool.query(
+      `SELECT tw.id, tw.window_type as "type", tw.label, 
+              tw.campus_target_time as "campusTargetTime",
+              tw.start_pickup_time as "startPickupTime",
+              tw.max_riders as "maxRiders"
+       FROM time_windows tw
+       WHERE tw.service_zone_id = $1 AND tw.is_active = true
+       ORDER BY tw.campus_target_time`,
+      [matchingZoneId]
+    );
+
+    // Get current assignment counts for each window
+    const windows = [];
+    for (const window of windowsResult.rows) {
+      const countResult = await pool.query(
+        `SELECT COUNT(*) as count
+         FROM window_assignments
+         WHERE time_window_id = $1 AND service_date = $2 AND status = 'CONFIRMED'`,
+        [window.id, date]
+      );
+
+      const confirmedCount = parseInt(countResult.rows[0].count, 10);
+      const availableSeats = window.maxRiders - confirmedCount;
+
+      windows.push({
+        id: window.id,
+        zoneId: matchingZoneId,
+        zoneName: matchingZoneName,
+        type: window.type,
+        label: window.label,
+        campusTargetTime: window.campusTargetTime,
+        startPickupTime: window.startPickupTime,
+        maxRiders: window.maxRiders,
+        confirmedCount,
+        availableSeats,
+        isFull: availableSeats <= 0,
+        currentRiderCount: confirmedCount,
+      });
+    }
+
+    return res.json({
+      inServiceArea: true,
+      zones: [{ id: matchingZoneId, name: matchingZoneName }],
+      windows,
+    });
+  } catch (err) {
+    console.error("Error getting available windows:", err);
+    return res.status(500).json({ error: "Failed to get available windows" });
+  }
+});
+
+/**
+ * POST /routing/can-add-to-window
+ * Check if a rider can be added to a specific time window
+ */
+routingRouter.post("/can-add-to-window", async (req: Request, res: Response) => {
+  const { serviceDate, timeWindowId, pickupLat, pickupLng, pickupAddress } = req.body;
+
+  if (!serviceDate || !timeWindowId || typeof pickupLat !== "number" || typeof pickupLng !== "number") {
+    return res.status(400).json({ error: "Missing required fields" });
+  }
+
+  try {
+    const result = await canAddRiderToWindow({
+      serviceDate,
+      timeWindowId,
+      pickupLat,
+      pickupLng,
+      pickupAddress,
+    });
+
+    return res.json(result);
+  } catch (err) {
+    console.error("Error checking window availability:", err);
+    return res.status(500).json({ error: "Failed to check window availability" });
+  }
+});
+
+/**
+ * POST /routing/confirm-window
+ * Confirm a rider's booking for a time window
+ */
+routingRouter.post("/confirm-window", async (req: Request, res: Response) => {
+  const userId = req.headers["x-user-id"];
+  if (!userId) {
+    return res.status(401).json({ error: "Authentication required" });
+  }
+
+  const { serviceDate, timeWindowId, pickupLat, pickupLng, pickupAddress } = req.body;
+
+  if (!serviceDate || !timeWindowId || typeof pickupLat !== "number" || typeof pickupLng !== "number") {
+    return res.status(400).json({ error: "Missing required fields" });
+  }
+
+  try {
+    const result = await confirmWindowAssignment({
+      userId: parseInt(userId as string, 10),
+      serviceDate,
+      timeWindowId,
+      pickupLat,
+      pickupLng,
+      pickupAddress,
+    });
+
+    return res.json(result);
+  } catch (err: any) {
+    console.error("Error confirming window:", err);
+    return res.status(400).json({ error: err.message || "Failed to confirm booking" });
+  }
+});
 
 /**
  * POST /routing/join-waitlist
- * 
- * Add an unserved request to the waitlist.
- * 
- * Body:
- * {
- *   address: string,
- *   lat: number,
- *   lng: number,
- *   desiredTimeType: "MORNING" | "EVENING",
- *   desiredTime?: string (HH:MM)
- * }
+ * Add a user to the waitlist for an unserved area
  */
-routingRouter.post('/join-waitlist', async (req: Request, res: Response) => {
+routingRouter.post("/join-waitlist", async (req: Request, res: Response) => {
+  const userId = req.headers["x-user-id"];
+  const { address, lat, lng, desiredTimeType } = req.body;
+
+  if (typeof lat !== "number" || typeof lng !== "number") {
+    return res.status(400).json({ error: "lat and lng are required" });
+  }
+
   try {
-    const userId = getUserIdFromHeader(req);
-    const { address, lat, lng, desiredTimeType, desiredTime } = req.body;
+    await pool.query(
+      `INSERT INTO unserved_requests 
+       (user_id, entered_address, lat, lng, desired_time_type, reason, waitlist_opt_in)
+       VALUES ($1, $2, $3, $4, $5, 'OUT_OF_ZONE', true)`,
+      [userId ? parseInt(userId as string, 10) : null, address || "", lat, lng, desiredTimeType || "MORNING"]
+    );
 
-    if (!address || lat === undefined || lng === undefined || !desiredTimeType) {
-      return res.status(400).json(fail(
-        'MISSING_FIELDS',
-        'address, lat, lng, and desiredTimeType are required.'
-      ));
-    }
-
-    // Determine the reason
-    const zones = await findServiceZonesForPoint({ lat: parseFloat(lat), lng: parseFloat(lng) });
-    const reason = zones.length === 0 ? 'OUT_OF_ZONE' : 'OTHER';
-
-    await pool.query(`
-      INSERT INTO unserved_requests (
-        user_id, entered_address, lat, lng,
-        desired_time_type, desired_time, reason, waitlist_opt_in
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, true)
-    `, [userId, address, lat, lng, desiredTimeType, desiredTime, reason]);
-
-    return res.json(ok({ joined: true }));
-
-  } catch (error) {
-    console.error('Error in POST /routing/join-waitlist:', error);
-    return res.status(500).json(fail('INTERNAL_ERROR', 'Failed to join waitlist.'));
+    return res.json({ success: true, message: "Added to waitlist" });
+  } catch (err) {
+    console.error("Error joining waitlist:", err);
+    return res.status(500).json({ error: "Failed to join waitlist" });
   }
 });
 
-// ============================================================================
-// Get User's Assignments
-// ============================================================================
-
-/**
- * GET /routing/my-assignments
- * 
- * Get the current user's window assignments.
- * 
- * Query params:
- * - from?: Start date (YYYY-MM-DD), defaults to today
- * - to?: End date (YYYY-MM-DD), defaults to 30 days from now
- */
-routingRouter.get('/my-assignments', async (req: Request, res: Response) => {
-  try {
-    const userId = getUserIdFromHeader(req);
-    if (!userId) {
-      return res.status(401).json(fail('UNAUTHORIZED', 'Missing or invalid x-user-id header.'));
-    }
-
-    const fromDate = (req.query.from as string) || new Date().toISOString().slice(0, 10);
-    const toDate = (req.query.to as string) || (() => {
-      const d = new Date();
-      d.setDate(d.getDate() + 30);
-      return d.toISOString().slice(0, 10);
-    })();
-
-    const result = await pool.query(`
-      SELECT 
-        wa.id,
-        wa.service_date as "serviceDate",
-        wa.pickup_lat as "pickupLat",
-        wa.pickup_lng as "pickupLng",
-        wa.pickup_address as "pickupAddress",
-        wa.status,
-        wa.estimated_pickup_time as "estimatedPickupTime",
-        wa.estimated_arrival_time as "estimatedArrivalTime",
-        tw.id as "timeWindowId",
-        tw.label as "timeWindowLabel",
-        tw.window_type as "windowType",
-        tw.campus_target_time as "campusTargetTime",
-        sz.name as "zoneName",
-        sz.campus_name as "campusName",
-        rp.google_route_polyline as "routePolyline"
-      FROM window_assignments wa
-      JOIN time_windows tw ON wa.time_window_id = tw.id
-      JOIN service_zones sz ON tw.service_zone_id = sz.id
-      LEFT JOIN route_plans rp ON rp.time_window_id = tw.id AND rp.service_date = wa.service_date
-      WHERE wa.user_id = $1
-        AND wa.service_date >= $2
-        AND wa.service_date <= $3
-        AND wa.status IN ('CONFIRMED', 'WAITLISTED')
-      ORDER BY wa.service_date ASC, tw.campus_target_time ASC
-    `, [userId, fromDate, toDate]);
-
-    return res.json(ok({ assignments: result.rows }));
-
-  } catch (error) {
-    console.error('Error in GET /routing/my-assignments:', error);
-    return res.status(500).json(fail('INTERNAL_ERROR', 'Failed to get assignments.'));
-  }
-});
-
-// ============================================================================
-// Get Route Plan Details (for map display)
-// ============================================================================
-
-/**
- * GET /routing/route-plan/:timeWindowId/:serviceDate
- * 
- * Get the route plan for a specific time window and date.
- * Includes polyline for map display.
- */
-routingRouter.get('/route-plan/:timeWindowId/:serviceDate', async (req: Request, res: Response) => {
-  try {
-    const timeWindowId = parseInt(req.params.timeWindowId, 10);
-    const serviceDate = req.params.serviceDate;
-
-    if (Number.isNaN(timeWindowId) || !/^\d{4}-\d{2}-\d{2}$/.test(serviceDate)) {
-      return res.status(400).json(fail('INVALID_PARAMS', 'Invalid timeWindowId or serviceDate.'));
-    }
-
-    const result = await pool.query(`
-      SELECT 
-        rp.id,
-        rp.service_date as "serviceDate",
-        rp.planned_departure_time as "plannedDepartureTime",
-        rp.ordered_assignment_ids as "orderedAssignmentIds",
-        rp.google_route_polyline as "polyline",
-        rp.google_base_duration_seconds as "durationSeconds",
-        rp.google_total_distance_meters as "distanceMeters",
-        tw.label as "timeWindowLabel",
-        tw.campus_target_time as "campusTargetTime",
-        sz.name as "zoneName",
-        sz.campus_lat as "campusLat",
-        sz.campus_lng as "campusLng",
-        sz.campus_name as "campusName"
-      FROM route_plans rp
-      JOIN time_windows tw ON rp.time_window_id = tw.id
-      JOIN service_zones sz ON tw.service_zone_id = sz.id
-      WHERE rp.time_window_id = $1 AND rp.service_date = $2
-    `, [timeWindowId, serviceDate]);
-
-    if (result.rows.length === 0) {
-      return res.status(404).json(fail('NOT_FOUND', 'Route plan not found.'));
-    }
-
-    const routePlan = result.rows[0];
-
-    // Get pickup stops in order
-    if (routePlan.orderedAssignmentIds && routePlan.orderedAssignmentIds.length > 0) {
-      const stopsResult = await pool.query(`
-        SELECT 
-          id,
-          pickup_lat as "lat",
-          pickup_lng as "lng",
-          pickup_address as "address"
-        FROM window_assignments
-        WHERE id = ANY($1)
-        ORDER BY array_position($1, id)
-      `, [routePlan.orderedAssignmentIds]);
-
-      routePlan.stops = stopsResult.rows;
-    } else {
-      routePlan.stops = [];
-    }
-
-    return res.json(ok(routePlan));
-
-  } catch (error) {
-    console.error('Error in GET /routing/route-plan:', error);
-    return res.status(500).json(fail('INTERNAL_ERROR', 'Failed to get route plan.'));
-  }
-});
-
-export { routingRouter };
 export default routingRouter;
 
