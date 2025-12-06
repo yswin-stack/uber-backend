@@ -371,3 +371,173 @@ export const DEFAULT_SCHEDULING_CONFIG: SchedulingConfig = {
   MONTE_CARLO_DEFAULT_RUNS: 1000,
 };
 
+// =============================================================================
+// Routing Engine Types (V8)
+// =============================================================================
+
+export type WindowType = 'MORNING' | 'EVENING';
+
+export type AssignmentStatus = 'CONFIRMED' | 'WAITLISTED' | 'REJECTED' | 'CANCELLED';
+
+export type UnservedReason = 'OUT_OF_ZONE' | 'DETOUR_TOO_LARGE' | 'WINDOW_FULL' | 'NO_CAPACITY' | 'OTHER';
+
+/**
+ * Geographic service zone where micro-transit operates.
+ */
+export interface ServiceZone {
+  id: number;
+  name: string;
+  polygon: GeoJSONPolygon;
+  centerLat: number;
+  centerLng: number;
+  isActive: boolean;
+  maxDetourSeconds: number;
+  maxRidersPerTrip: number;
+  maxAnchorDistanceMeters: number | null;
+  campusLat: number;
+  campusLng: number;
+  campusName: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface GeoJSONPolygon {
+  type: 'Polygon';
+  coordinates: number[][][]; // [[[lng, lat], [lng, lat], ...]]
+}
+
+/**
+ * Time window within a service zone.
+ */
+export interface TimeWindow {
+  id: number;
+  serviceZoneId: number;
+  windowType: WindowType;
+  label: string;
+  campusTargetTime: string; // HH:MM:SS
+  startPickupTime: string;  // HH:MM:SS
+  maxRiders: number;
+  isActive: boolean;
+}
+
+/**
+ * Rider assignment to a time window for a specific date.
+ */
+export interface WindowAssignment {
+  id: number;
+  userId: number;
+  timeWindowId: number;
+  serviceDate: string;
+  pickupLat: number;
+  pickupLng: number;
+  pickupAddress?: string;
+  pickupStopId?: number;
+  status: AssignmentStatus;
+  estimatedPickupTime?: string;
+  estimatedArrivalTime?: string;
+}
+
+/**
+ * Planned route for a date + time window combination.
+ */
+export interface RoutePlan {
+  id: number;
+  serviceDate: string;
+  timeWindowId: number;
+  plannedDepartureTime: string;
+  orderedAssignmentIds: number[];
+  googleRoutePolyline?: string;
+  googleBaseDurationSeconds?: number;
+  googleTotalDistanceMeters?: number;
+  anchorAssignmentId?: number;
+}
+
+/**
+ * Result of checking if a rider can be added to a window.
+ */
+export interface CanAddRiderResult {
+  accepted: boolean;
+  bestInsertionIndex?: number;
+  extraSeconds?: number;
+  newTotalDurationSeconds?: number;
+  estimatedPickupTime?: string;
+  estimatedArrivalTime?: string;
+  reason?: string;
+  alternativeWindows?: AlternativeWindow[];
+}
+
+export interface AlternativeWindow {
+  timeWindowId: number;
+  label: string;
+  availableSeats: number;
+  estimatedPickupTime: string;
+  estimatedArrivalTime: string;
+}
+
+/**
+ * Unserved ride request for expansion planning.
+ */
+export interface UnservedRequest {
+  id: number;
+  userId?: number;
+  enteredAddress: string;
+  lat: number;
+  lng: number;
+  desiredTimeType: WindowType;
+  desiredTime?: string;
+  reason: UnservedReason;
+  reasonDetails?: string;
+  waitlistOptIn: boolean;
+  expansionClusterId?: number;
+}
+
+/**
+ * Cluster of unserved requests for potential service expansion.
+ */
+export interface ExpansionCluster {
+  id: number;
+  name?: string;
+  polygon?: GeoJSONPolygon;
+  centerLat?: number;
+  centerLng?: number;
+  radiusMeters?: number;
+  numRequests: number;
+  isActivated: boolean;
+  activatedServiceZoneId?: number;
+}
+
+/**
+ * Route snapshot for ML/analytics.
+ */
+export interface RouteSnapshot {
+  id: number;
+  originLat: number;
+  originLng: number;
+  destinationLat: number;
+  destinationLng: number;
+  distanceMeters: number;
+  durationSeconds: number;
+  durationInTrafficSeconds?: number;
+  timeWindowId?: number;
+  serviceDate?: string;
+  departureTime?: string;
+  routeType?: string;
+  capturedAt: string;
+}
+
+/**
+ * Trip log for completed trips.
+ */
+export interface TripLog {
+  id: number;
+  serviceDate: string;
+  timeWindowId: number;
+  routePlanId?: number;
+  startedAt?: string;
+  endedAt?: string;
+  actualDurationSeconds?: number;
+  actualRoutePolyline?: string;
+  notes?: string;
+  driverId?: number;
+}
+
