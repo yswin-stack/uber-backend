@@ -6,9 +6,33 @@
 import { Router, Request, Response } from "express";
 import { pool } from "../db/pool";
 import { canAddRiderToWindow, confirmWindowAssignment } from "../lib/routingEngine";
-import * as turf from "@turf/turf";
 
 export const routingRouter = Router();
+
+/**
+ * Simple point-in-polygon check using ray casting algorithm
+ * No external dependencies needed
+ */
+function isPointInPolygon(point: { lng: number; lat: number }, polygon: number[][][]): boolean {
+  if (!polygon || !polygon[0]) return false;
+
+  const ring = polygon[0]; // Outer ring
+  let inside = false;
+  const x = point.lng;
+  const y = point.lat;
+
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const xi = ring[i][0];
+    const yi = ring[i][1];
+    const xj = ring[j][0];
+    const yj = ring[j][1];
+
+    const intersect = yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi;
+    if (intersect) inside = !inside;
+  }
+
+  return inside;
+}
 
 /**
  * POST /routing/check-service-area
@@ -29,14 +53,12 @@ routingRouter.post("/check-service-area", async (req: Request, res: Response) =>
        WHERE is_active = true`
     );
 
-    const point = turf.point([lng, lat]);
     const matchingZones = [];
 
     for (const zone of zonesResult.rows) {
-      if (zone.polygon) {
+      if (zone.polygon && zone.polygon.coordinates) {
         try {
-          const polygon = turf.polygon(zone.polygon.coordinates);
-          if (turf.booleanPointInPolygon(point, polygon)) {
+          if (isPointInPolygon({ lng, lat }, zone.polygon.coordinates)) {
             matchingZones.push({
               id: zone.id,
               name: zone.name,
@@ -104,15 +126,13 @@ routingRouter.get("/available-windows", async (req: Request, res: Response) => {
        WHERE is_active = true`
     );
 
-    const point = turf.point([lng, lat]);
     let matchingZoneId: number | null = null;
     let matchingZoneName: string | null = null;
 
     for (const zone of zonesResult.rows) {
-      if (zone.polygon) {
+      if (zone.polygon && zone.polygon.coordinates) {
         try {
-          const polygon = turf.polygon(zone.polygon.coordinates);
-          if (turf.booleanPointInPolygon(point, polygon)) {
+          if (isPointInPolygon({ lng, lat }, zone.polygon.coordinates)) {
             matchingZoneId = zone.id;
             matchingZoneName = zone.name;
             break;
@@ -270,4 +290,3 @@ routingRouter.post("/join-waitlist", async (req: Request, res: Response) => {
 });
 
 export default routingRouter;
-
