@@ -19,6 +19,8 @@ import { plansRouter } from "./routes/plans";
 import { availabilityRouter } from "./routes/availability";
 import { holdsRouter } from "./routes/holds";
 import { capacityRouter } from "./routes/capacity";
+import { routingRouter } from "./routes/routing";
+import { serviceZonesRouter } from "./routes/serviceZones";
 import { initDb } from "./db/init";
 import { setupTrackingSockets } from "./sockets/tracking";
 import { notFoundHandler, errorHandler } from "./middleware/errorHandler";
@@ -65,6 +67,8 @@ app.use("/plans", plansRouter);
 app.use("/availability", availabilityRouter);
 app.use("/holds", holdsRouter);
 app.use("/admin/capacity", capacityRouter);
+app.use("/routing", routingRouter);
+app.use("/admin/service-zones", serviceZonesRouter);
 
 // 404 + error handlers (must be after all routes)
 app.use(notFoundHandler);
