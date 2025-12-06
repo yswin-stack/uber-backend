@@ -10,31 +10,6 @@ import { canAddRiderToWindow, confirmWindowAssignment } from "../lib/routingEngi
 export const routingRouter = Router();
 
 /**
- * Simple point-in-polygon check using ray casting algorithm
- * No external dependencies needed
- */
-function isPointInPolygonCoords(point: { lng: number; lat: number }, coordinates: number[][][]): boolean {
-  if (!coordinates || !coordinates[0]) return false;
-
-  const ring = coordinates[0]; // Outer ring
-  let inside = false;
-  const x = point.lng;
-  const y = point.lat;
-
-  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
-    const xi = ring[i][0];
-    const yi = ring[i][1];
-    const xj = ring[j][0];
-    const yj = ring[j][1];
-
-    const intersect = yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi;
-    if (intersect) inside = !inside;
-  }
-
-  return inside;
-}
-
-/**
  * GET /routing/service-zones
  * Get active service zones (public - no auth required)
  * Used for displaying zone on maps
@@ -119,6 +94,9 @@ routingRouter.get("/active-time-windows", async (req: Request, res: Response) =>
 });
 
 /**
+ * Simple point-in-polygon check using ray casting algorithm
+ * No external dependencies needed
+ */
 function isPointInPolygon(point: { lng: number; lat: number }, polygon: number[][][]): boolean {
   if (!polygon || !polygon[0]) return false;
 
