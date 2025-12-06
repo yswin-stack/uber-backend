@@ -1121,6 +1121,162 @@ meRouter.get(
 
 /**
  * --------------------------------------------------
+ *  POST /me/address
+ *  Save the user's validated pickup address.
+ *  This is the first step in onboarding.
+ * --------------------------------------------------
+ */
+meRouter.post(
+  "/address",
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const authUser = req.user;
+    if (!authUser) {
+      return res
+        .status(401)
+        .json(fail("UNAUTHENTICATED", "Please log in to save your address."));
+    }
+
+    const userId = authUser.id;
+    const { address, lat, lng, zoneId, validated } = req.body as {
+      address?: string;
+      lat?: number;
+      lng?: number;
+      zoneId?: number;
+      validated?: boolean;
+    };
+
+    if (!address || typeof lat !== "number" || typeof lng !== "number") {
+      return res
+        .status(400)
+        .json(
+          fail(
+            "INVALID_ADDRESS_INPUT",
+            "Please provide a valid address with coordinates."
+          )
+        );
+    }
+
+    try {
+      await pool.query(
+        `
+        UPDATE users
+        SET 
+          default_pickup_address = $1,
+          default_pickup_lat = $2,
+          default_pickup_lng = $3,
+          address_zone_id = $4,
+          address_validated = $5
+        WHERE id = $6
+        `,
+        [address, lat, lng, zoneId || null, validated !== false, userId]
+      );
+
+      // Also save to saved_locations as "home" for backward compatibility
+      const existing = await pool.query(
+        `SELECT id FROM saved_locations WHERE user_id = $1 AND label = 'home' LIMIT 1`,
+        [userId]
+      );
+
+      if (existing.rowCount && existing.rows.length > 0) {
+        await pool.query(
+          `UPDATE saved_locations SET address = $1, lat = $2, lng = $3 WHERE id = $4`,
+          [address, lat, lng, existing.rows[0].id]
+        );
+      } else {
+        await pool.query(
+          `INSERT INTO saved_locations (user_id, label, address, lat, lng) VALUES ($1, 'home', $2, $3, $4)`,
+          [userId, address, lat, lng]
+        );
+      }
+
+      return res.json(
+        ok({
+          address,
+          lat,
+          lng,
+          zoneId,
+          validated: validated !== false,
+        })
+      );
+    } catch (err: any) {
+      console.error("Error in POST /me/address:", err);
+      return res
+        .status(500)
+        .json(
+          fail(
+            "ADDRESS_SAVE_FAILED",
+            `Failed to save your address: ${err?.message || "Unknown error"}`
+          )
+        );
+    }
+  }
+);
+
+/**
+ * --------------------------------------------------
+ *  GET /me/address
+ *  Get the user's saved pickup address.
+ * --------------------------------------------------
+ */
+meRouter.get(
+  "/address",
+  requireAuth,
+  async (req: Request, res: Response) => {
+    const authUser = req.user;
+    if (!authUser) {
+      return res
+        .status(401)
+        .json(fail("UNAUTHENTICATED", "Please log in to view your address."));
+    }
+
+    const userId = authUser.id;
+
+    try {
+      const result = await pool.query(
+        `
+        SELECT 
+          default_pickup_address as address,
+          default_pickup_lat as lat,
+          default_pickup_lng as lng,
+          address_zone_id as "zoneId",
+          address_validated as validated
+        FROM users
+        WHERE id = $1
+        `,
+        [userId]
+      );
+
+      if (!result.rowCount) {
+        return res.json(ok({ address: null, lat: null, lng: null, zoneId: null, validated: false }));
+      }
+
+      const row = result.rows[0];
+      return res.json(
+        ok({
+          address: row.address,
+          lat: row.lat,
+          lng: row.lng,
+          zoneId: row.zoneId,
+          validated: row.validated || false,
+        })
+      );
+    } catch (err: any) {
+      console.error("Error in GET /me/address:", err);
+      return res
+        .status(500)
+        .json(
+          fail(
+            "ADDRESS_FETCH_FAILED",
+            "Failed to load your address."
+          )
+        );
+    }
+  }
+);
+
+/**
+ * --------------------------------------------------
  *  POST /me/onboarding/skip
  *  Mark onboarding as skipped for the current user.
  * --------------------------------------------------
@@ -1354,7 +1510,7 @@ meRouter.get("/setup", requireAuth, async (req: Request, res: Response) => {
       pool.query(
         `
         SELECT 1
-        FROM user_weekly_schedule
+        FROM user_schedules
         WHERE user_id = $1
         LIMIT 1
         `,
@@ -1366,7 +1522,10 @@ meRouter.get("/setup", requireAuth, async (req: Request, res: Response) => {
           onboarding_completed,
           onboarding_skipped,
           driver_is_online,
-          driver_last_online_at
+          driver_last_online_at,
+          address_validated,
+          address_zone_id,
+          default_pickup_address
         FROM users
         WHERE id = $1
         LIMIT 1
@@ -1386,11 +1545,20 @@ meRouter.get("/setup", requireAuth, async (req: Request, res: Response) => {
         ? (userRes as any).rows[0]
         : undefined;
 
+    // Check if user has a validated address (new address-first flow)
+    const has_validated_address = !!(
+      userRow &&
+      userRow.address_validated &&
+      userRow.default_pickup_address
+    );
+
     return res.json(
       ok({
         has_home,
         has_work,
         has_schedule,
+        has_validated_address,
+        address_zone_id: userRow?.address_zone_id || null,
         onboarding_completed: !!(
           userRow && userRow.onboarding_completed
         ),
